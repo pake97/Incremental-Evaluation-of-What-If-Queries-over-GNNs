@@ -1,7 +1,6 @@
-# Incremental What-if Queries over GNNs
+# Incremental-Evaluation-of-What-If-Queries-over-GNNs
 
-Experimental harness for a paper on **answering what-if (forward counterfactual)
-queries over GNNs incrementally**. A what-if query evaluates a *frozen* trained
+Experimental harness for the paper **# Incremental-Evaluation-of-What-If-Queries-over-GNNs**. A what-if query evaluates a *frozen* trained
 GNN on a hypothetically modified graph `G^Δ = G ⊕ Δ` and reads a query `Q` off the
 output. Instead of recomputing the GNN from scratch, we **incrementally maintain**
 cached forward state, and **reuse** it across an exploration graph of many related
@@ -261,11 +260,5 @@ everything downstream. (The store-backed experiments are skipped unless
   nodes recomputed); wall-clock is reported as the unoptimized-prototype lower bound
   (see `results/README.md`, "Two currencies").
 
-## Notes for reviewers
 
-Baselines are **internal ablations** (from-scratch, incremental-no-reuse,
-incremental+reuse) plus two re-implemented published primitives (Ripple, NeutronRT).
-There is no external competitor system: streaming-GNN systems maintain a single
-committed timeline with no branching/backtracking, so they do not answer the
-exploration workload evaluated here. This framing is stated in `results/README.md`.
-# Incremental-Evaluation-of-What-If-Queries-over-GNNs
+
