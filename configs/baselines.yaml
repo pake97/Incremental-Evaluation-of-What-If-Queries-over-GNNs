@@ -1,0 +1,6 @@
+# Baseline comparison: ours vs Ripple vs NeutronRT vs from-scratch.
+datasets: [finbench, faers, eicu, snb]
+archs: [rgcn, hgat]
+layers: 2
+sizes: [1, 100, 1000]
+reps: 5

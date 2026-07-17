@@ -1,0 +1,8 @@
+# Experiment 3 — layer scaling: efficiency protocol swept over L = 1..4
+# at fixed intervention sizes.
+datasets: [finbench, faers, eicu, snb]
+archs: [rgcn, hgat]
+task: nodelabel
+cohort_size: 100
+topo_edits: 10
+reps: 7

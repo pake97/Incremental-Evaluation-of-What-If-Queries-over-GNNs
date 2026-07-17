@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# Local tooling files (not part of the research artifact)
+# ---------------------------------------------------------------------------
+.claude/
+.agents/
+CLAUDE.md
+skills-lock.json
+.mcp.json
+
+# ---------------------------------------------------------------------------
+# Generated outputs — recreated by the scripts, never committed
+# regenerate: figures -> run_figures.sh, checkpoints -> run_train.sh,
+# results -> run the experiments
+# ---------------------------------------------------------------------------
+figures/
+checkpoints/
+results/
+
+# ---------------------------------------------------------------------------
+# Data — large and/or credentialed (eICU & FAERS/PhysioNet are access-controlled)
+# rebuild processed graphs with scripts/run_prepare_data.sh
+# ---------------------------------------------------------------------------
+dataset/
+db_export/
+
+# ---------------------------------------------------------------------------
+# Secrets / local config (copy configs/db.yaml.template -> configs/db.yaml)
+# ---------------------------------------------------------------------------
+configs/db.yaml
+
+# ---------------------------------------------------------------------------
+# Third-party paper PDFs — don't redistribute (cite them in the paper instead).
+# Remove this line if you keep the repo private and want them included.
+# ---------------------------------------------------------------------------
+references/
+
+# ---------------------------------------------------------------------------
+# Python / environment
+# ---------------------------------------------------------------------------
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+.DS_Store
+**/.DS_Store
+*.swp
+.idea/
+.vscode/

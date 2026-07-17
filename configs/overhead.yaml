@@ -1,0 +1,7 @@
+# Overhead decomposition: proxy (algorithmic) vs wall-clock (Python prototype),
+# with the per-call overhead floor made explicit.
+datasets: [finbench, faers, eicu, snb]
+archs: [rgcn, hgat]
+layers: 2
+sizes: [1, 10, 100, 1000]
+reps: 11

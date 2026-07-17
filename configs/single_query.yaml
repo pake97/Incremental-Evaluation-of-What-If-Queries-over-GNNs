@@ -1,0 +1,9 @@
+# Experiment 2 — single-query efficiency: incremental vs from-scratch latency,
+# varying intervention size/locality. Baseline = full recompute.
+datasets: [finbench, faers, eicu, snb]
+archs: [rgcn, hgat]
+layers: [2]
+task: nodelabel
+cohort_sizes: [1, 10, 100, 1000]   # feature-Δ locality sweep
+edit_sizes: [1, 10, 100, 1000]     # topo-Δ size sweep (n_add = n_del = size)
+reps: 9                            # median of reps

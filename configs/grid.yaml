@@ -1,0 +1,9 @@
+# Full grid: intervention kind x size x depth L x architecture, per dataset.
+# Feeds the comprehensive latency / operations / sign-flip figures.
+datasets: [finbench, faers, eicu, snb]
+archs: [rgcn, hgat]
+task: nodelabel
+kinds: [feature, edge_add, edge_del, edge_swap]
+sizes: [1, 100, 1000]
+layers: [1, 2, 3, 4]
+reps: 5

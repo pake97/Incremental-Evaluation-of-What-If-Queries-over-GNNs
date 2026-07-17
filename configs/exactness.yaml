@@ -1,0 +1,11 @@
+# Experiment 1 — exactness gate: incremental == from-scratch on random Δ,
+# for every (dataset, model, task, intervention kind).
+datasets: [finbench, faers, eicu, snb]
+archs: [rgcn, hgat]
+layers: [1, 2, 3, 4]
+tasks: [nodelabel, linkpred, linkreg]
+kinds: [feature, topo, mixed]
+n_per_kind: 3          # random interventions per combination
+max_cohort: 200        # feature-Δ cohort size sampled in [1, max_cohort)
+max_edits: 50          # topo-Δ add/del count sampled in [1, max_edits)
+n_readout_pairs: 512   # candidate pairs for the link-task readout check

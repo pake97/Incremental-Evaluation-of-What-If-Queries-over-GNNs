@@ -1,0 +1,51 @@
+# Reproducible graph-store stack for the store-backed what-if experiment.
+#   docker compose up -d
+#   ./db/load_all.sh finbench eicu          # load graphs into the running DBs
+# Neo4j and Memgraph both speak Bolt; they are put on DIFFERENT host ports
+# (7687 vs 7688) so they can run side by side. TigerGraph needs one extra
+# manual start step (see db/README.md). db_export/ is mounted read-only for
+# bulk-import paths; the default loader streams over Bolt and needs no mount.
+services:
+  neo4j:
+    image: neo4j:5
+    container_name: rcf-neo4j
+    ports:
+      - "7474:7474"        # HTTP / browser
+      - "7687:7687"        # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/rcfpassword
+      NEO4J_server_memory_heap_max__size: 2G      # keep memory footprint modest
+      NEO4J_server_memory_pagecache_size: 1G
+      NEO4J_dbms_security_allow__csv__import__from__file__urls: "true"
+    volumes:
+      - ./db_export:/var/lib/neo4j/import   # rw: neo4j entrypoint chowns this dir
+      - neo4j_data:/data
+
+  memgraph:
+    image: memgraph/memgraph-mage:latest
+    container_name: rcf-memgraph
+    ports:
+      - "7688:7687"        # Bolt (host 7688 to avoid clashing with Neo4j)
+      - "7444:7444"
+    command: ["--also-log-to-stderr"]
+    volumes:
+      - ./db_export:/import:ro
+      - memgraph_data:/var/lib/memgraph
+
+  tigergraph:
+    image: tigergraph/community:latest
+    container_name: rcf-tigergraph
+    ports:
+      - "9000:9000"        # REST++
+      - "14240:14240"      # GraphStudio
+    volumes:
+      - ./db_export:/home/tigergraph/db_export:ro
+      - tigergraph_data:/home/tigergraph/tigergraph/data
+    # Community image does not auto-start services; after `up`, run:
+    #   docker compose exec tigergraph bash -lc 'gadmin start all'
+    tty: true
+
+volumes:
+  neo4j_data:
+  memgraph_data:
+  tigergraph_data:

@@ -1,0 +1,35 @@
+# Connection details for the store-backed what-if experiment.
+# Copy to configs/db.yaml (gitignored) — defaults already match docker-compose.yml,
+# so with the compose stack up you only need to flip `enabled: true`.
+# The harness skips any DB left disabled.
+
+neo4j:
+  enabled: true
+  uri: bolt://localhost:7687
+  user: neo4j
+  password: rcfpassword     # matches NEO4J_AUTH in docker-compose.yml
+  database: neo4j
+
+memgraph:
+  enabled: true
+  uri: bolt://localhost:7688 # compose maps Memgraph Bolt to host 7688 (Neo4j has 7687)
+  user: ""                   # memgraph-mage default: no auth
+  password: ""
+
+tigergraph:
+  enabled: false             # heavier; enable after `gadmin start all`
+  host: http://localhost
+  rest_port: 9000
+  gs_port: 14240
+  user: tigergraph
+  password: tigergraph
+  graph_prefix: rcf_         # graph name per dataset: rcf_<dataset>
+
+# Which datasets are loaded into the DBs (must match db_export/<dataset>/).
+datasets: [finbench, eicu]   # add faers, snb once loaded
+# Interventions to time per dataset (mirrors configs/baselines.yaml).
+archs: [rgcn, hgat]          # only used to align Δ sampling with the baselines
+sizes: [1, 100, 1000]
+reps: 5
+read_lhop: true              # also time reading the L-hop closure of edited endpoints
+layers: 2

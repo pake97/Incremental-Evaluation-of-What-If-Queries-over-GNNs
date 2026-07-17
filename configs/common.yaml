@@ -1,0 +1,19 @@
+# Shared experiment constants.
+seed: 42
+# Float-equivalence tolerances for the exactness gate (incremental vs
+# from-scratch). Tighten if float32 headroom allows; loosen only with a
+# written justification.
+#
+# JUSTIFICATION for atol 1e-5 -> 1e-4 (2026-07-10, SNB L=4 rgcn feature/delta):
+# The closure path is BITWISE identical to from-scratch (max_abs_err = 0.0).
+# The low-rank delta path differs from float32 from-scratch by up to 2.2e-5 at
+# L=4 on the 367k-node SNB graph (~6.3M edge messages accumulated). A float64
+# reference shows WHY this is not an error: from-scratch float32 is itself
+# 3.18e-5 from the float64 truth, and the delta path is 3.20e-5 from it — i.e.
+# the delta path is as accurate as float32 arithmetic permits; the two paths
+# merely accumulate in different (both valid) orders. 1e-4 absolute on O(1)
+# embeddings is a 0.01% tolerance — still a strong exactness statement, and the
+# float64-reference guard in tests/test_incremental_exactness.py catches any
+# delta deviation that EXCEEDS float32 noise (a genuine bug).
+atol: 1.0e-4
+rtol: 1.0e-4
