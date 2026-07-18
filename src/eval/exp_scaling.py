@@ -35,6 +35,23 @@ from src.models.tasks import spec
 EXP = "scaling"
 
 
+def arch_flops(arch, verts, edges, H):
+    """Impl-independent FLOP proxy (2 x multiply-accumulates), derived from the
+    cell code. The two architectures differ in WHERE the multiplications live:
+      * RGCN: multiplications are the per-NODE linears (W_msg on sources, W_self
+        on dst) + the mean-normalisation; the aggregation itself is additive, so
+        RGCN FLOPs scale with nodes recomputed, not edges.
+      * hGAT: adds a per-NODE attention-query linear AND a per-EDGE attention cost
+        (score dot-products + attention-weighted message), so it scales with both
+        nodes and edges and is strictly higher than RGCN on the same closure.
+    verts = nodes recomputed (x layers), edges = messages aggregated (x layers)."""
+    if arch == "rgcn":
+        macs = 2 * verts * H * H + verts * H
+    else:  # hgat
+        macs = 3 * verts * H * H + (2 * verts + edges) * H
+    return int(2 * macs)
+
+
 def bench(fn, reps):
     walls, out = [], None
     for _ in range(reps):
@@ -92,15 +109,19 @@ def main():
                         inc_edges = res.stats["edges_touched"]
                         common = {"dataset": dataset, "arch": arch, "kind": kind,
                                   "frac": frac, "size": size, "layers": L}
+                        H = model.cfg["hidden"]
+                        inc_verts = res.stats["nodes_recomputed"]
                         rows.append({**common, "method": "from_scratch",
                                      "edges": scratch_edges, "verts": scratch_verts,
+                                     "flops": arch_flops(arch, scratch_verts, scratch_edges, H),
                                      "sign_flips": 0,
                                      "wall_measured_ms": round(wall_scr * 1e3, 3),
                                      "latency_best_ms": round(wall_scr * 1e3, 3),
                                      "exact": True})
                         rows.append({**common, "method": "ours",
                                      "edges": inc_edges,
-                                     "verts": res.stats["nodes_recomputed"],
+                                     "verts": inc_verts,
+                                     "flops": arch_flops(arch, inc_verts, inc_edges, H),
                                      "sign_flips": res.stats.get("sign_flips", 0),
                                      "wall_measured_ms": round(wall_inc * 1e3, 3),
                                      "latency_best_ms": round(inc_edges * per_edge * 1e3, 4),

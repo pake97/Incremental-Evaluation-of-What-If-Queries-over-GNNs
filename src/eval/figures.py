@@ -65,7 +65,7 @@ def fig_overhead():
         # compiled-bulk rate; the gap at small Δ is pure framework overhead
         ax = axes[1][j]
         ax.plot(sub["size"], sub.inc_wall_per_edge_us, "o-", color=C[0],
-                linewidth=2, markersize=4, label="incremental")
+                linewidth=2, markersize=4, label="INQ-RGCN")
         ax.plot(sub["size"], sub.scratch_wall_per_edge_us, "s--", color=C[1],
                 linewidth=2, markersize=4, label="from-scratch (compiled bulk)")
         ax.set_xscale("log"); ax.set_yscale("log")
@@ -86,9 +86,9 @@ def _overhead_kinds(df):
 
 # fixed color per (arch, method) so every grid panel reads the same way
 _GRID_STYLE = {
-    ("rgcn", "incremental"): (C[0], "o-", "incremental (RGCN)"),
+    ("rgcn", "incremental"): (C[0], "o-", "INQ-RGCN"),
     ("rgcn", "scratch"):     (C[0], "o--", "from-scratch (RGCN)"),
-    ("hgat", "incremental"): (C[5], "s-", "incremental (HGAT)"),
+    ("hgat", "incremental"): (C[5], "s-", "INQ-hGAT"),
     ("hgat", "scratch"):     (C[5], "s--", "from-scratch (HGAT)"),
 }
 _GRID_KINDS = ["feature", "edge_add", "edge_del", "edge_swap"]
@@ -148,7 +148,7 @@ def fig_grid_latency_all():
         out = _fig_grid(
             ds,
             value=lambda s: (s.wall_incremental_best_s * 1e3, s.wall_scratch_s * 1e3),
-            title="Single-query latency: incremental (best impl.) vs from-scratch",
+            title="Single-query latency: INQ (best impl.) vs from-scratch",
             ylabel="latency (ms)",
             fname=f"grid_latency_{ds}.png")
         if out:
@@ -162,7 +162,7 @@ def fig_grid_operations_all():
         out = _fig_grid(
             ds,
             value=lambda s: (s.inc_edges, s.scratch_edges),
-            title="Single-query operations: incremental vs from-scratch",
+            title="Single-query operations: INQ vs from-scratch",
             ylabel="edge-messages",
             fname=f"grid_operations_{ds}.png")
         if out:
@@ -327,11 +327,11 @@ def fig_single_query_best():
             scratch_ms = s.wall_scratch_s * 1e3
             proto_ms = s.wall_incremental_s * 1e3
             ax.plot(s["size"], inc_best_ms, "o-", color=C[0], linewidth=2,
-                    markersize=4, label="incremental (projected best)")
+                    markersize=4, label="INQ-RGCN (projected best)")
             ax.plot(s["size"], scratch_ms, "s--", color=C[1], linewidth=1.4,
                     markersize=3, label="from-scratch (measured)")
             ax.plot(s["size"], proto_ms, "^:", color=C[2], linewidth=1,
-                    markersize=3, alpha=0.5, label="incremental (Python prototype)")
+                    markersize=3, alpha=0.5, label="INQ-RGCN (Python prototype)")
             ax.set_xscale("log"); ax.set_yscale("log")
             if i == 0:
                 ax.set_title(ds)
@@ -366,7 +366,7 @@ def fig_single_query_operations():
             ax = axes[i][j]
             s = df[(df.dataset == ds) & (df.kind == kind)].sort_values("size")
             ax.plot(s["size"], s.inc_edges, "o-", color=C[0], linewidth=2,
-                    markersize=4, label="incremental")
+                    markersize=4, label="INQ-RGCN")
             ax.plot(s["size"], s.scratch_edges, "s--", color=C[1], linewidth=1.4,
                     markersize=3, label="from-scratch (all edges × L)")
             ax.set_xscale("log"); ax.set_yscale("log")
@@ -426,7 +426,7 @@ _BASELINE_STYLE = {
     "from_scratch": (C[3], "x:", "from-scratch"),
     "ripple":       (C[2], "s-", "Ripple"),
     "neutronrt":    (C[1], "D-", "NeutronRT"),
-    "ours":         (C[0], "o-", "ours"),
+    "ours":         (C[0], "o-", "INQ"),
 }
 _BASELINE_ORDER = ["from_scratch", "ripple", "neutronrt", "ours"]
 
@@ -576,7 +576,7 @@ def fig_db_roundtrip():
                         linewidth=2, markersize=5, label="streaming (Δ + L-hop read)")
                 onetime = s.one_time_load_ms.iloc[0]
                 ax.axhline(onetime, color=C[0], linestyle="--", linewidth=1.4,
-                           label="ours: one-time load (then 0/query)")
+                           label="INQ: one-time load (then 0/query)")
                 ax.set_xscale("log"); ax.set_yscale("log")
                 if i == 0:
                     ax.set_title(f"{kind} Δ")
@@ -620,7 +620,7 @@ def _db_pipeline_bars(mode, kind="feature"):
     if df is None or "arch" not in df.columns:
         return None
     APPROACH = [("from_scratch", "from-scratch"), ("ripple", "Ripple"),
-                ("neutronrt", "NeutronRT"), ("ours", "ours")]
+                ("neutronrt", "NeutronRT"), ("ours", "INQ")]
     STEP_ALL = [("full", C[3]), ("update", C[2]), ("gnn", C[0])]
     STEP = STEP_ALL[1:] if mode == "nodownload" else STEP_ALL
     HATCH = {"rgcn": "", "hgat": "///"}
@@ -709,12 +709,12 @@ def _db_pipeline_bars(mode, kind="feature"):
     fig.legend(handles=handles, frameon=False, fontsize=8, ncol=5,
                loc="upper center", bbox_to_anchor=(0.5, 1.0))
     TITLE = {
-        "absolute": "absolute (linear): download dominates; ours' bar is gnn only",
-        "proportional": "proportional (100%): composition — full ~99% for baselines, ours = 100% gnn",
+        "absolute": "absolute (linear): download dominates; INQ' bar is gnn only",
+        "proportional": "proportional (100%): composition — full ~99% for baselines, INQ = 100% gnn",
         "zoom": "zoomed to update+gnn range: full (download) overflows/clipped",
         "nodownload": "download removed: only update+gnn (baselines) / gnn (ours)",
-        "overlay": "overlaid (layered) bars on log axis: full/update/gnn each from floor; ours = gnn",
-        "log": "stacked on LOG axis (segment sizes distorted; makes ours' total visible)",
+        "overlay": "overlaid (layered) bars on log axis: full/update/gnn each from floor; INQ = gnn",
+        "log": "stacked on LOG axis (segment sizes distorted; makes INQ' total visible)",
     }[mode]
     fig.suptitle(f"Store-backed what-if step-times ({kind} Δ) — {TITLE}", y=1.04, fontsize=9)
     fig.tight_layout()
@@ -741,7 +741,7 @@ def fig_db_finbench_2x2():
     if df.empty:
         return []
     APPROACH = [("from_scratch", "from-scratch"), ("ripple", "Ripple"),
-                ("neutronrt", "NeutronRT"), ("ours", "ours")]
+                ("neutronrt", "NeutronRT"), ("ours", "INQ")]
     # gnn first (bottom), update second (top) — update orange sits above gnn blue.
     STEP = [("gnn", C[0]), ("update", C[2])]
     HATCH = {"rgcn": "", "hgat": "///"}
@@ -818,7 +818,7 @@ def fig_db_full_appendix():
     if df is None or "arch" not in df.columns:
         return []
     APPROACH = [("from_scratch", "from-scratch"), ("ripple", "Ripple"),
-                ("neutronrt", "NeutronRT"), ("ours", "ours")]
+                ("neutronrt", "NeutronRT"), ("ours", "INQ")]
     STEP = [("gnn", C[0]), ("update", C[2])]      # gnn bottom, update on top
     HATCH = {"rgcn": "", "hgat": "///"}
     archs = ["rgcn", "hgat"]
@@ -884,7 +884,7 @@ def fig_db_full_appendix():
     fig.legend(handles=handles, frameon=False, fontsize=8, ncol=4,
                loc="upper center", bbox_to_anchor=(0.5, 1.0))
     fig.suptitle("Store-backed what-if step-times (all datasets) — update (orange) stacked on "
-                 "gnn (blue); download removed; ours = gnn only", y=1.005, fontsize=10)
+                 "gnn (blue); download removed; INQ = gnn only", y=1.005, fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.985))
     return [(fig, "db_full_appendix.png")]
 
@@ -920,12 +920,12 @@ def fig_scaling_L2():
     datasets = [x for x in _SCALE_DATASETS if x in set(d2.dataset.unique())]
     out = []
     for ycol, ylab, fname, title in (
-            ("edges", "num ops", "scaling_L2_operations.png",
-             "Num. ops. comparison between from-scratch and incremental evaluation"),
+            ("flops", "FLOPs", "scaling_L2_operations.png",
+             "FLOPs comparison between from-scratch and INQ evaluation"),
             ("latency_best_ms", "latency (ms)", "scaling_L2_latency.png",
-             "Latency comparison between from-scratch and incremental evaluation")):
-        # plain (non-scientific) tick labels; ints for ops, ms for latency
-        if ycol == "edges":
+             "Latency comparison between from-scratch and INQ evaluation")):
+        # plain (non-scientific) tick labels; ints for FLOPs, ms for latency
+        if ycol == "flops":
             fmt = lambda v, _: f"{v:,.0f}"
         else:
             fmt = lambda v, _: (f"{v:,.0f}" if v >= 100 else f"{v:.0f}"
@@ -938,8 +938,11 @@ def fig_scaling_L2():
                 ax = axes[i][j]
                 sub = d2[(d2.dataset == ds) & (d2.kind == kind)]
                 yvals = []
-                for method, (color, _) in _SCALE_APPROACH.items():
-                    for arch, ls in _SCALE_LS.items():
+                # color = architecture; linestyle = method (INQ dashed, from-scratch solid)
+                arch_color = {"rgcn": C[0], "hgat": C[3]}
+                method_ls = {"from_scratch": "-", "ours": "--"}
+                for method, ls in method_ls.items():
+                    for arch, color in arch_color.items():
                         s = sub[(sub.method == method) & (sub.arch == arch)].sort_values("pct")
                         if s.empty:
                             continue
@@ -950,10 +953,14 @@ def fig_scaling_L2():
                 # collapse ticks within ~4% (indistinguishable on a log axis) so
                 # labels don't overprint where lines bunch together.
                 if yvals:
-                    # bottom-right panel (faers, structure Δ) keeps a tick at nearly
-                    # every point; other panels collapse ticks within ~11%.
+                    # bottom-right panel = faers, structure Δ. For FLOPs (near-
+                    # coincident RGCN/hGAT values) keep every tick but nudge close
+                    # labels apart; for latency it over-crowds, so thin the ticks.
                     is_br = (i == len(kinds) - 1) and (j == len(datasets) - 1)
-                    thresh = 1.001 if is_br else 1.11
+                    if ycol == "flops":
+                        thresh, sep_labels = (1.001, True) if is_br else (1.11, False)
+                    else:  # latency: thin the faers-structure ticks
+                        thresh, sep_labels = (1.06, False) if is_br else (1.11, False)
                     ticks = []
                     for v in sorted(set(round(v, 1) for v in yvals)):
                         if not ticks or v > ticks[-1] * thresh:
@@ -963,16 +970,24 @@ def fig_scaling_L2():
                     ax.yaxis.set_minor_formatter(NullFormatter())
                     ax.tick_params(axis="y", which="major", labelsize=5.5)
                     ax.tick_params(axis="y", which="minor", length=0)
+                    if sep_labels:
+                        # push labels of near-coincident ticks apart: lower one
+                        # below its tick, upper one above, so both stay readable.
+                        labs = ax.get_yticklabels()
+                        for k in range(1, len(ticks)):
+                            if ticks[k] <= ticks[k - 1] * 1.10:
+                                labs[k - 1].set_verticalalignment("top")
+                                labs[k].set_verticalalignment("bottom")
                 if i == 0:
                     ax.set_title(ds)
                 if i == len(kinds) - 1:
                     ax.set_xlabel("update size")
                 if j == 0:
                     ax.set_ylabel(f"{klab[kind]} Δ\n{ylab}", fontsize=8)
-        h = [ml.Line2D([], [], color=C[0], ls="-", lw=2, marker="o", ms=4, label="incr. RGCN"),
-             ml.Line2D([], [], color=C[0], ls="--", lw=2, marker="o", ms=4, label="incr. hGAT"),
-             ml.Line2D([], [], color=C[3], ls="-", lw=2, marker="o", ms=4, label="from-scratch RGCN"),
-             ml.Line2D([], [], color=C[3], ls="--", lw=2, marker="o", ms=4, label="from-scratch hGAT")]
+        h = [ml.Line2D([], [], color=C[0], ls="--", lw=2, marker="o", ms=4, label="INQ-RGCN"),
+             ml.Line2D([], [], color=C[0], ls="-", lw=2, marker="o", ms=4, label="from-scratch-RGCN"),
+             ml.Line2D([], [], color=C[3], ls="--", lw=2, marker="o", ms=4, label="INQ-hGAT"),
+             ml.Line2D([], [], color=C[3], ls="-", lw=2, marker="o", ms=4, label="from-scratch-hGAT")]
         fig.legend(handles=h, frameon=False, fontsize=8, ncol=4,
                    loc="upper center", bbox_to_anchor=(0.5, 1.0))
         fig.suptitle(title, y=1.03, fontsize=10)
@@ -983,10 +998,10 @@ def fig_scaling_L2():
 
 def _scaling_legend(fig):
     import matplotlib.lines as ml
-    h = [ml.Line2D([], [], color=C[0], lw=3, label="ours"),
-         ml.Line2D([], [], color=C[3], lw=3, label="from-scratch"),
-         ml.Line2D([], [], color="#333", ls="-", label="RGCN"),
-         ml.Line2D([], [], color="#333", ls="--", label="hGAT")]
+    h = [ml.Line2D([], [], color=C[0], ls="-", lw=2, label="INQ-RGCN"),
+         ml.Line2D([], [], color=C[0], ls="--", lw=2, label="INQ-hGAT"),
+         ml.Line2D([], [], color=C[3], ls="-", lw=2, label="from-scratch RGCN"),
+         ml.Line2D([], [], color=C[3], ls="--", lw=2, label="from-scratch hGAT")]
     fig.legend(handles=h, frameon=False, fontsize=8, ncol=4,
                loc="upper center", bbox_to_anchor=(0.5, 1.0))
 
@@ -1050,13 +1065,13 @@ def fig_scaling_signflips():
                 if s.empty:
                     continue
                 ax.plot(s.layers, s.sign_flips.clip(lower=0.5), ls, color=C[0],
-                        lw=2, marker="^", ms=5, label=arch.upper())
+                        lw=2, marker="^", ms=5, label=("INQ-RGCN" if arch=="rgcn" else "INQ-hGAT"))
             ax.set_xticks([1, 2, 3, 4]); ax.set_yscale("log")
             ax.set_title(ds); ax.set_xlabel("layers L")
             if j == 0:
                 ax.set_ylabel("sign-flips (nonlinear corrections)")
                 ax.legend(frameon=False, fontsize=8)
-        fig.suptitle(f"Scalability vs depth — sign-flips (ours), feature Δ at {pct}%",
+        fig.suptitle(f"Scalability vs depth — sign-flips (INQ), feature Δ at {pct}%",
                      y=1.04, fontsize=9)
         fig.tight_layout()
         out.append((fig, f"scaling_signflips_{pct}pct.png"))
@@ -1083,14 +1098,16 @@ def fig_scaling_speedup_flips():
             continue
         fig, axes = plt.subplots(1, len(datasets),
                                  figsize=(4.4 * len(datasets), 2.5), squeeze=False)
-        # color = metric (blue speedup / orange sign-flips); linestyle = arch.
-        C_SPD, C_FLIP = C[0], C[2]
-        arch_ls = {"rgcn": "-", "hgat": "--"}
+        # color = (metric x arch), all solid lines. speedup: INQ-RGCN blue,
+        # INQ-hGAT green. sign-flips: RGCN orange, hGAT pink.
+        SPD_C = {"rgcn": C[0], "hgat": C[3]}
+        BROWN = "#8c564b"
+        FLIP_C = {"rgcn": C[2], "hgat": BROWN}
         for j, ds in enumerate(datasets):
             axL = axes[0][j]
             axR = axL.twinx()
             sub = dp[dp.dataset == ds]
-            for arch, ls in arch_ls.items():
+            for arch in ("rgcn", "hgat"):
                 sa = sub[sub.arch == arch]
                 s = sa[sa.method == "ours"].sort_values("layers")
                 p = sa.pivot_table(index="layers", columns="method",
@@ -1098,8 +1115,8 @@ def fig_scaling_speedup_flips():
                 if "ours" not in p or "from_scratch" not in p:
                     continue
                 spd = (p["from_scratch"] / p["ours"])
-                axL.plot(spd.index, spd.values, ls, color=C_SPD, lw=2, marker="o", ms=4)
-                axR.plot(s.layers, s.sign_flips.clip(lower=0.5), ls, color=C_FLIP,
+                axL.plot(spd.index, spd.values, "-", color=SPD_C[arch], lw=2, marker="o", ms=4)
+                axR.plot(s.layers, s.sign_flips.clip(lower=0.5), "-", color=FLIP_C[arch],
                          lw=1.6, marker="^", ms=5, alpha=0.9)
             axL.set_xticks([1, 2, 3, 4]); axL.set_xlabel("layers L")
             axL.axhline(1.0, color="#999", lw=0.8, ls=":")
@@ -1110,10 +1127,10 @@ def fig_scaling_speedup_flips():
             if j == len(datasets) - 1:
                 axR.set_ylabel("sign-flips")
         import matplotlib.lines as ml
-        h = [ml.Line2D([], [], color=C_SPD, ls="-", lw=2, marker="o", ms=4, label="incr. RGCN"),
-             ml.Line2D([], [], color=C_SPD, ls="--", lw=2, marker="o", ms=4, label="incr. hGAT"),
-             ml.Line2D([], [], color=C_FLIP, ls="-", lw=2, marker="^", ms=5, label="sign-flips RGCN"),
-             ml.Line2D([], [], color=C_FLIP, ls="--", lw=2, marker="^", ms=5, label="sign-flips hGAT")]
+        h = [ml.Line2D([], [], color=C[0], ls="-", lw=2, marker="o", ms=4, label="INQ-RGCN"),
+             ml.Line2D([], [], color=C[3], ls="-", lw=2, marker="o", ms=4, label="INQ-hGAT"),
+             ml.Line2D([], [], color=C[2], ls="-", lw=2, marker="^", ms=5, label="RGCN sign-flips"),
+             ml.Line2D([], [], color=BROWN, ls="-", lw=2, marker="^", ms=5, label="hGAT sign-flips")]
         fig.legend(handles=h, frameon=False, fontsize=8, ncol=4,
                    loc="upper center", bbox_to_anchor=(0.5, 1.0))
         klabel = {"feature": "attribute", "topo": "structure"}[kind]
@@ -1162,20 +1179,29 @@ def fig_interactive_eicu(out):
             ax0.plot(steps, Qd, ":", color=C[4], lw=1.4, marker="D", ms=4, mfc="none",
                      label="NeutronRT", zorder=3)
         ax0.plot(steps, Qb, "--", color=C[0], lw=1.6, marker="s", ms=5, mfc="none",
-                 label="ours", zorder=4)
+                 label=f"INQ-{titles[arch]}", zorder=4)
         ax0.plot(steps, Qc, "-", color=C[5], lw=2, marker="^", ms=4, label="Ripple", zorder=3)
         if min(min(Qa), min(Qc)) - 0.05 <= thr <= max(max(Qa), max(Qc)) + 0.05:
             ax0.axhline(thr, color="#999", ls=":", lw=1)
             ax0.annotate(f"≤{int(thr*100)}%", (steps[-1], thr), fontsize=6, color="#777",
                          va="bottom", ha="right")
-        e1 = rows[1]["ripple_query_abs_err"]; ef = rows[-1]["ripple_query_abs_err"]
-        ax0.annotate(f"{e1*100:.1f}pp", (1, Qc[1]), xytext=(3, -8), textcoords="offset points",
-                     fontsize=6, color=C[5])
-        ax0.annotate(f"{ef*100:.1f}pp", (steps[-1], Qc[-1]), xytext=(-2, 6),
-                     textcoords="offset points", fontsize=6, color=C[5], ha="right", fontweight="bold")
+        # signed Ripple deviation (Q_ripple - truth) as a percentage, at EVERY
+        # step (S1..S4). Placed below each Ripple point, except the lowest point
+        # in the panel (placed above so it doesn't clip the axis). RGCN's lines
+        # are tightly spaced, so nudge its labels a little further down.
+        allmin = min(Qa + Qb + Qc)
+        for si in range(1, len(rows)):
+            dev = (rows[si]["Q_ripple"] - rows[si]["Q_scratch"]) * 100
+            last = (si == len(rows) - 1)
+            below = Qc[si] > allmin + 1e-9
+            dy = (-13 if arch == "rgcn" else -10) if below else 8
+            ax0.annotate(f"{dev:.1f} %", (steps[si], Qc[si]), xytext=(0, dy),
+                         textcoords="offset points", fontsize=6, color=C[5],
+                         ha="center", va=("top" if below else "bottom"),
+                         fontweight=("bold" if last else "normal"))
         if j == 0:
             ax0.set_ylabel(out.get("q_ylabel", "high-risk\nfraction Q"), fontsize=8)
-            ax0.legend(fontsize=6, frameon=False, loc="upper left", handlelength=1.6)
+        ax0.legend(fontsize=6, frameon=False, loc="upper left", handlelength=1.6)  # per-column (INQ-<arch>)
         ax0.tick_params(labelsize=7)
 
         # ROW 2: cumulative end-to-end latency (ms)
@@ -1187,10 +1213,10 @@ def fig_interactive_eicu(out):
         if has_neu:   # NeutronRT re-fetches every state too — climbs with baselines
             ln = [r["cum_lat_ms_neutronrt"] for r in rows]
             ax1.plot(steps, ln, ":", color=C[4], lw=1.6, marker="D", ms=4, label="NeutronRT")
-        ax1.plot(steps, lo, "-", color=C[0], lw=2, marker="s", ms=4, label="ours")
+        ax1.plot(steps, lo, "-", color=C[0], lw=2, marker="s", ms=4, label=f"INQ-{titles[arch]}")
         if j == 0:
             ax1.set_ylabel("cum. latency\n(ms)", fontsize=8)
-            ax1.legend(fontsize=6, frameon=False, loc="upper left", handlelength=1.6)
+        ax1.legend(fontsize=6, frameon=False, loc="upper left", handlelength=1.6)  # per-column (INQ-<arch>)
         ax1.set_xlabel("session step", fontsize=8)
         ax1.set_xticks(steps); ax1.set_xticklabels(labels)
         ax1.tick_params(labelsize=7)
@@ -1235,7 +1261,7 @@ def fig_db_cumulative(size=100, n_queries=25):
             ax.plot(k, [q * strm for q in k], "-", color=C[2], linewidth=2,
                     label="streaming (read region every query)")
             ax.plot(k, [load + q * 0 for q in k], "-", color=C[0], linewidth=2.5,
-                    label="ours (load once, then 0/query)")
+                    label="INQ (load once, then 0/query)")
             ax.set_title(ds)
             ax.set_xlabel("what-if queries in session")
             if j == 0:
@@ -1269,7 +1295,7 @@ def fig_single_query():
             for a, arch in enumerate(sorted(sub.arch.unique())):
                 s = sub[sub.arch == arch].sort_values("size")
                 ax.plot(s["size"], s.wall_incremental_s * 1e3, "o-", color=C[a],
-                        linewidth=2, markersize=4, label=f"incremental ({arch})")
+                        linewidth=2, markersize=4, label=f"INQ-{'RGCN' if arch=='rgcn' else 'hGAT'}")
                 ax.plot(s["size"], s.wall_scratch_s * 1e3, "--", color=C[a],
                         linewidth=1.2, alpha=0.55, label=f"from-scratch ({arch})")
             ax.set_xscale("log"); ax.set_yscale("log")
@@ -1369,7 +1395,7 @@ def fig_layer_scaling():
             ax.set_ylabel("speedup vs from-scratch")
             ax.legend(frameon=False, fontsize=7)
         ax.set_yscale("log")
-    fig.suptitle("Layer scaling of incremental speedup", y=1.05)
+    fig.suptitle("Layer scaling of INQ speedup", y=1.05)
     return fig, "layer_scaling.png"
 
 
@@ -1411,7 +1437,7 @@ def fig_exploration_totals():
     agg = df.groupby("share_rate")[["scratch_wall_s", "incremental_wall_s",
                                     "reuse_wall_s"]].mean().reset_index()
     fig, ax = plt.subplots(figsize=(4.2, 3.0))
-    labels = ["from-scratch", "incremental (no reuse)", "incremental + reuse"]
+    labels = ["from-scratch", "INQ (no reuse)", "INQ + reuse"]
     for i, col in enumerate(["scratch_wall_s", "incremental_wall_s", "reuse_wall_s"]):
         ax.plot(agg.share_rate, agg[col], "o-", color=C[i], linewidth=2,
                 markersize=4, label=labels[i])

@@ -35,7 +35,7 @@ import yaml
 
 from src.baselines.harness import BaselineCache, Counters
 from src.baselines.methods import NeutronRT, Ripple
-from src.data.graph_state import GraphState
+from src.data.graph_state import GraphState, Intervention
 from src.data.loader import load_graph
 from src.db.roundtrip import (BoltStore, _apply_delta, _build_tensors,
                               _download_raw, _edit_pairs)
@@ -58,6 +58,26 @@ def med(fn, reps, warmup=0):
     for _ in range(reps):
         t0 = time.perf_counter(); fn(); xs.append(time.perf_counter() - t0)
     return statistics.median(xs)
+
+
+def batch_iv(iv, b):
+    """Split an intervention into a sequence of <= b-sized sub-interventions —
+    faithful to NeutronRT/Ripple, which stream updates in batches of ~0.01%|E|.
+    A size-S what-if becomes ceil(S/b) sequential incremental passes."""
+    subs = []
+    for nt, delta in iv.feat_deltas.items():
+        rows = (delta.abs().sum(-1) > 0).nonzero(as_tuple=False).squeeze(1)
+        for i in range(0, rows.numel(), b):
+            chunk = rows[i:i + b]
+            d = torch.zeros_like(delta); d[chunk] = delta[chunk]
+            subs.append(Intervention(feat_deltas={nt: d}))
+    for et, add in iv.add_edges.items():
+        for i in range(0, add.size(1), b):
+            subs.append(Intervention(add_edges={et: add[:, i:i + b]}))
+    for et, cols in iv.del_cols.items():
+        for i in range(0, cols.numel(), b):
+            subs.append(Intervention(del_cols={et: cols[i:i + b]}))
+    return subs or [iv]
 
 
 def clear_query_cache(store):
@@ -169,32 +189,43 @@ def main():
                     t_apply = statistics.median([apply_t() for _ in range(reps)]) * 1e3
                     t_rollback = statistics.median([rollback_t() for _ in range(reps)]) * 1e3
 
+                    # NeutronRT streams updates in batches of ~batch_frac*|E|;
+                    # a size-S what-if is ceil(S/b) sequential incremental passes.
+                    # Ripple is a one-shot linear look-forward delta (NOT batched).
+                    E_stored = sum(t.size(1) for t in gs.edge_index.values())
+                    b = max(1, round(cfg.get("neutron_batch_frac", 1e-4) * E_stored))
+
                     for arch in archs:
                         model = models[arch]
                         icache, bcache = icaches[arch], bcaches[arch]
-                        # --- GNN steps (in-memory), per architecture ---
-                        # from-scratch: measured full-forward wall (a few large kernels,
-                        # already near-optimal). Incremental methods: report the impl-
-                        # INDEPENDENT roofline (op-count x from-scratch per-edge rate),
-                        # matching latency_best_ms in the scaling figures. Raw prototype
-                        # wall-clock would be dominated by per-kernel framework overhead
-                        # and understate the method (see results/README "Two currencies").
+                        neu, rip = NeutronRT(model, gs, icache), Ripple(model, gs, icache)
+                        # --- GNN steps: BEST-IMPL latency (edge-count x from-scratch
+                        # per-edge rate), consistent with scaling_L2_latency. Raw eager
+                        # wall would be dominated by per-kernel Python overhead and
+                        # understate every incremental method (see results/README
+                        # "Two currencies"). from-scratch defines the per-edge rate.
                         Etot = sum(t.size(1) for t in gs.edge_index.values()) * 2
                         scratch_edges = Etot * L
                         t_fwd = med(lambda: model.encode(xa[0], xa[1]), reps) * 1e3
                         per_edge = t_fwd / max(scratch_edges, 1)
                         inc_edges = incremental_forward(model, gs, icache, iv).stats["edges_touched"]
-                        Counters.reset(); Ripple(model, gs, icache).apply(bcache, iv)
+                        subs = batch_iv(iv, b)
+                        n_batches = len(subs)
+                        Counters.reset(); neu.apply(bcache, subs[0])
+                        neu_batch_edges = Counters.edges
+                        Counters.reset(); neu.apply(bcache, iv)
+                        neu_one_edges = Counters.edges
+                        Counters.reset(); rip.apply(bcache, iv)
                         rip_edges = Counters.edges
-                        Counters.reset(); NeutronRT(model, gs, icache).apply(bcache, iv)
-                        neu_edges = Counters.edges
                         t_incr = inc_edges * per_edge
+                        t_neu = n_batches * neu_batch_edges * per_edge   # faithful batched
+                        t_neu_one = neu_one_edges * per_edge             # charitable one-shot
                         t_ripple = rip_edges * per_edge
-                        t_neu = neu_edges * per_edge
+                        t_rip_one = t_ripple
 
                         meta = {"db": db_name, "dataset": dataset, "arch": arch,
                                 "kind": kind, "size": size,
-                                "pct": round(size / dim * 100)}
+                                "pct": round(size / dim * 100), "n_batches": n_batches}
                         # OURS: never touches the DB per query (Δ is hypothetical,
                         # in memory) -> apply/download/tensor/rollback = 0 per query;
                         # download+tensor is a one-time session cost.
@@ -202,18 +233,22 @@ def main():
                                      "t_apply_ms": 0.0, "t_download_ms": 0.0,
                                      "t_tensor_ms": 0.0, "t_rollback_ms": 0.0,
                                      "t_gnn_ms": round(t_incr, 3),
+                                     "t_gnn_onebatch_ms": round(t_incr, 3),
                                      "per_query_ms": round(t_incr, 3),
                                      "one_time_ms": round(t_download + t_tensor, 2)})
                         # from-scratch & baselines: per query = apply Δ + ONE
-                        # download + build tensors + GNN + rollback.
-                        for m, tg in (("from_scratch", t_fwd), ("ripple", t_ripple),
-                                      ("neutronrt", t_neu)):
+                        # download + build tensors + GNN + rollback (committed-timeline
+                        # store, no disposable overlay -> re-download every query).
+                        for m, tg, tg1 in (("from_scratch", t_fwd, t_fwd),
+                                           ("ripple", t_ripple, t_rip_one),
+                                           ("neutronrt", t_neu, t_neu_one)):
                             rows.append({**meta, "method": m,
                                          "t_apply_ms": round(t_apply, 3),
                                          "t_download_ms": round(t_download, 2),
                                          "t_tensor_ms": round(t_tensor, 2),
                                          "t_rollback_ms": round(t_rollback, 3),
                                          "t_gnn_ms": round(tg, 3),
+                                         "t_gnn_onebatch_ms": round(tg1, 3),
                                          "per_query_ms": round(t_apply + t_download
                                               + t_tensor + tg + t_rollback, 2),
                                          "one_time_ms": 0.0})

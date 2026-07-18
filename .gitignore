@@ -54,3 +54,23 @@ __pycache__/
 *.swp
 .idea/
 .vscode/
+
+# ---------------------------------------------------------------------------
+# LaTeX — the supplement source/build live here only for convenience; the
+# distributed artifact is Supp_material_Interactive_What_If_Exploration_of_GNN.pdf
+# ---------------------------------------------------------------------------
+appendix.tex
+appendix.pdf
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.synctex(busy)
+*.toc
+*.cls
+*.bst
+*.bib
