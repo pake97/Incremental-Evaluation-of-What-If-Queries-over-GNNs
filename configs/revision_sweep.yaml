@@ -1,0 +1,25 @@
+# OPTIONAL. Figure 3 stays at 5-30% (data already in results/revision_v2). Use this only if
+# the 30% point on a sparse dataset still shows a gap worth closing. x = update size 5..50%, L = 2, one column per dataset, three rows:
+#   (a-d) measured latency, (e-h) operations (proxy), (i-l) memory per query
+#   (ours RGCN / hGAT, from-scratch RGCN / hGAT, cache size as a dashed constant).
+# No break-even here: k is measured in the session experiment (R2.O2).
+# Run against the existing experiment dir so the 5-30% rows are reused and only 40/50% run:
+#   venv/bin/python -m src.eval.exp_revision --config configs/revision_sweep.yaml \
+#       --impl v2 --exp revision_v2 --parts B D report
+# Same sampling as configs/revision.yaml (seed 42, size = max(1, round(frac x dim))).
+datasets: [finbench, faers, eicu, snb]
+archs: [rgcn, hgat]
+task: nodelabel
+layers: [2]
+kinds: [feature, topo]
+fracs: [0.05, 0.10, 0.20, 0.30]   # add 0.40, 0.50 to extend the axis
+
+reps_latency: 10
+warmup_latency: 1
+reps_memory: 5
+reps_build: 5
+
+fixed_layers: 2
+extras_frac: 0.10
+mem_workers: 4
+db_config: configs/db.yaml

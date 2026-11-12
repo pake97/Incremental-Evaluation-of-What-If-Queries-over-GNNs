@@ -59,7 +59,7 @@ def delta_forward(model, cache: ForwardCache, feat_deltas: Dict[str, torch.Tenso
     N = {nt: cache.h[0][nt].size(0) for nt in enc.node_types}
     hidden = enc.hidden
     stats = {"method": "delta", "nodes_recomputed": 0, "edges_touched": 0,
-             "sign_flips": 0, "dirty_frontier": []}
+             "edges_scanned": 0, "sign_flips": 0, "dirty_frontier": []}
 
     ei_all = cache.ei_all(enc.fwd_types)
 
@@ -93,6 +93,7 @@ def delta_forward(model, cache: ForwardCache, feat_deltas: Dict[str, torch.Tenso
             ei = ei_all[et]
             if s in rows and ei.numel():
                 li_src = lookup[s][ei[0]]
+                stats["edges_scanned"] += ei.size(1)
                 m = li_src >= 0
                 if bool(m.any()):
                     e_dst = ei[1][m]

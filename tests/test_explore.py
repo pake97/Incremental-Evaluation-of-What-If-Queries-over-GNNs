@@ -116,3 +116,32 @@ def test_reuse_resumes_from_ancestors(env):
     assert deep and any(r["ancestor_depth"] > 0 for r in deep)
     # residual work strictly smaller than replaying the full set for those
     assert all(r["residual_size"] <= r["depth"] for r in rows)
+
+
+@pytest.mark.parametrize("arch", ["rgcn", "hgat"])
+@pytest.mark.parametrize("feature_frac", [0.5, 1.0])   # 1.0: chains of delta-path overlays
+@pytest.mark.parametrize("max_caches", [10 ** 9, 3, 1])
+def test_v2_reuse_exact_on_trace(env, arch, feature_frac, max_caches):
+    """impl='v2' reuse resumes from ancestor OverlayCaches (overlays on overlays)
+    with residual dirty sets; every state must equal from-scratch on G^D, under
+    every retention policy (evicted ancestors stay reachable through overlays)."""
+    data, schema, gs = env
+    path = os.path.join(CHECKPOINTS, "finbench", f"nodelabel_{arch}_L2.pt")
+    if not os.path.exists(path):
+        pytest.skip("checkpoint missing")
+    model = load_model(path)
+    cfg = TraceConfig(n_states=30, branching=2, max_depth=12, backtrack_rate=0.2,
+                      share_rate=0.3, feature_frac=feature_frac, cohort_size=16,
+                      topo_edits=4, node_type="account", relation=TR, seed=7)
+    trace = generate(schema, gs, cfg)
+    rows = run_trace(model, gs, schema, trace, "reuse", max_caches=max_caches,
+                     check_every=1, impl="v2", account=True)
+    assert all(r["exact_pass"] for r in rows), \
+        [(r["state_idx"], r["exact_max_abs_err"]) for r in rows if not r["exact_pass"]]
+    if max_caches > 1:
+        assert any(r["ancestor_depth"] > 0 for r in rows)
+    else:
+        assert all(r["ancestor_depth"] == 0 for r in rows)
+    if arch == "rgcn" and feature_frac == 1.0:
+        assert all(r["method"] == "delta" for r in rows)
+    assert all(r["retained_bytes"] > 0 for r in rows)

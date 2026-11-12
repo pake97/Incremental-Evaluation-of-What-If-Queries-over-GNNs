@@ -1,0 +1,19 @@
+# SIGMOD revision measurements (R1.O3, R1.Q2, R2.O1, R3.O1, R3.O4, Fig. 3/4).
+# Intervention sampling is identical to configs/scaling.yaml (same seed, same
+# size = max(1, round(frac x dim))) so rows join with results/scaling.
+datasets: [finbench, faers, eicu, snb]
+archs: [rgcn, hgat]
+task: nodelabel
+layers: [1, 2, 3, 4]
+kinds: [feature, topo]
+fracs: [0.05, 0.10, 0.15, 0.20, 0.30]
+
+reps_latency: 10        # timed runs per method (median/p10/p90) ...
+warmup_latency: 1       # ... after this many discarded warm-up runs
+reps_memory: 5          # fresh subprocesses per (setting, method)
+reps_build: 5           # warm build repetitions (after the first run)
+
+fixed_layers: 2         # Parts B, C, E run at L=2
+extras_frac: 0.10       # Part A.2: one feature + one topo query at this frac
+mem_workers: 4          # Part B subprocesses in flight (peak RSS is per process)
+db_config: configs/db.yaml

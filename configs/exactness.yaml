@@ -9,3 +9,4 @@ n_per_kind: 3          # random interventions per combination
 max_cohort: 200        # feature-Δ cohort size sampled in [1, max_cohort)
 max_edits: 50          # topo-Δ add/del count sampled in [1, max_edits)
 n_readout_pairs: 512   # candidate pairs for the link-task readout check
+impls: [v1, v2]          # v2 is additionally checked against v1 on every Δ

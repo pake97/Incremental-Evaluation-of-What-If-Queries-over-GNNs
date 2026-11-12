@@ -730,7 +730,7 @@ def fig_db_pipeline():
     return figs
 
 
-def fig_db_finbench_2x2():
+def fig_db_finbench_2x2(only=None):
     """FinBench focus: 2x2 panels (rows=DB neo4j/memgraph, cols=kind feature/topo),
     download removed (update+gnn only, like nodownload), with the UPDATE step (orange)
     stacked ON TOP of the GNN step (blue). ours = gnn only (no DB update)."""
@@ -746,7 +746,8 @@ def fig_db_finbench_2x2():
     STEP = [("gnn", C[0]), ("update", C[2])]
     HATCH = {"rgcn": "", "hgat": "///"}
     archs = ["rgcn", "hgat"]
-    dbs = [d for d in ("neo4j", "memgraph") if d in set(df.db.unique())]
+    dbs = [d for d in ("neo4j", "memgraph") if d in set(df.db.unique())
+           and (only is None or d == only)]
     kinds = ["feature", "topo"]
     fig, axes = plt.subplots(len(dbs), len(kinds),
                              figsize=(4.6 * len(kinds), 3.2 * len(dbs)), squeeze=False)
@@ -807,7 +808,9 @@ def fig_db_finbench_2x2():
     fig.suptitle("Latency vs intervention size against the baselines for FinBench",
                  y=1.03, fontsize=10)
     fig.tight_layout()
-    return [(fig, "db_finbench_2x2.png")]
+    if only:
+        return [(fig, f"db_finbench_{only}.png")]
+    return [(fig, "db_finbench_2x2.png"), *fig_db_finbench_2x2("neo4j")]
 
 
 def fig_db_full_appendix():
@@ -1449,7 +1452,765 @@ def fig_exploration_totals():
     return fig, "exploration_totals.png"
 
 
+# ------------------------------------------------------------------ revision
+# Single-column (3.4 in) PDFs, every text >= 9 pt at print size. Only rows that
+# passed the exactness gate are plotted; latency is MEASURED (never the
+# latency_best_ms projection).
+_REV_W = 3.4
+_REV_RC = {"font.size": 9, "axes.titlesize": 9, "axes.labelsize": 9,
+           "xtick.labelsize": 9, "ytick.labelsize": 9, "legend.fontsize": 9}
+_REV_DS = ["eicu", "finbench", "snb", "faers"]
+_REV_DS_C = {"eicu": C[0], "finbench": C[1], "snb": C[2], "faers": C[4]}
+_REV_ARCH_C = {"rgcn": C[0], "hgat": C[3]}
+_REV_ARCH = {"rgcn": "RGCN", "hgat": "hGAT"}
+_REV_KIND = {"feature": "attribute Δ", "topo": "structure Δ"}
+
+
+def _rev_lat(exp="revision"):
+    df = _load(exp, "latency.csv")
+    if df is None:
+        return None
+    df = df[df.passed == True].copy()   # exactness gate
+    df["pct"] = (df.frac * 100).round().astype(int)
+    return df
+
+
+def _rev_datasets(df):
+    return [d for d in _REV_DS if d in set(df.dataset)]
+
+
+def fig_revision_memory():
+    s = _load("revision", "cache_size_summary.csv")
+    b = _load("revision", "build_cost.csv")
+    if s is None:
+        return None
+    s = s[s.L == 2]
+    build = {}
+    if b is not None:
+        bm = b[(b.backend == "memory") & (b.phase == "build_cache")]
+        build = {(r.dataset, r.arch): r.warm_median_s for r in bm.itertuples()}
+    ds = _rev_datasets(s)
+    fig, ax = plt.subplots(figsize=(_REV_W, 2.6))
+    w = 0.38
+    for k, arch in enumerate(("rgcn", "hgat")):
+        for i, d in enumerate(ds):
+            r = s[(s.dataset == d) & (s.arch == arch)]
+            if r.empty:
+                continue
+            r = r.iloc[0]
+            x = i + (k - 0.5) * w
+            ax.bar(x, r.cache_MB, w, color=_REV_ARCH_C[arch])
+            ax.bar(x, r.extras_MB, w, bottom=r.cache_MB, color="white",
+                   edgecolor=_REV_ARCH_C[arch], hatch="////", lw=0.6)
+            if (d, arch) in build:
+                ax.text(x, (r.cache_MB + r.extras_MB) * 1.12, f"{build[(d, arch)]:.2g} s",
+                        ha="center", va="bottom", rotation=90, fontsize=9)
+    ax.set_yscale("log")
+    ax.set_xticks(range(len(ds)), ds)
+    ax.set_ylabel("cache size (MB)")
+    ax.set_ylim(1, ax.get_ylim()[1] * 8)
+    import matplotlib.patches as mp
+    ax.legend(handles=[mp.Patch(color=C[0], label="RGCN"), mp.Patch(color=C[3], label="hGAT"),
+                       mp.Patch(facecolor="white", edgecolor="#555", hatch="////",
+                                label="lazy extras")],
+              frameon=False, ncol=3, loc="upper left")
+    ax.set_title("Cache footprint at L=2 (label: in-memory build time)")
+    return fig, "revision_memory_L2.pdf"
+
+
+def fig_revision_latency_L2(exp="revision", fname="revision_latency_L2.pdf"):
+    df = _rev_lat(exp)
+    if df is None:
+        return None
+    d2 = df[df.layers == 2]
+    ds = _rev_datasets(d2)
+    fig, axes = plt.subplots(len(ds), 2, figsize=(_REV_W, 1.55 * len(ds) + 0.6),
+                             squeeze=False, sharex=True)
+    for i, d in enumerate(ds):
+        for j, kind in enumerate(("feature", "topo")):
+            ax = axes[i][j]
+            sub = d2[(d2.dataset == d) & (d2.kind == kind)]
+            for arch, col in _REV_ARCH_C.items():
+                s = sub[sub.arch == arch].sort_values("pct")
+                for m, ls in (("scratch", "-"), ("ours", "--")):
+                    ax.plot(s.pct, s[f"{m}_median_ms"], ls, color=col, lw=1.5,
+                            marker="o", ms=3)
+                    ax.fill_between(s.pct, s[f"{m}_p10_ms"], s[f"{m}_p90_ms"],
+                                    color=col, alpha=0.18, lw=0)
+            ax.set_yscale("log")
+            if i == 0:
+                ax.set_title(_REV_KIND[kind])
+            if j == 0:
+                ax.set_ylabel(f"{d}\nms")
+            if i == len(ds) - 1:
+                ax.set_xlabel("update size (%)")
+    import matplotlib.lines as ml
+    h = [ml.Line2D([], [], color=_REV_ARCH_C[a], ls=ls, lw=1.5, label=f"{lab}-{_REV_ARCH[a]}")
+         for a in ("rgcn", "hgat") for ls, lab in (("--", "INQ"), ("-", "scratch"))]
+    fig.legend(handles=h, frameon=False, ncol=2, loc="upper center")
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.55 / fig.get_figheight()))
+    return fig, fname
+
+
+def fig_revision_latency_layers(pct=10):
+    df = _rev_lat()
+    if df is None:
+        return None
+    dp = df[df.pct == pct]
+    ds = _rev_datasets(dp)
+    FLIP_C = {"rgcn": C[2], "hgat": "#8c564b"}
+    fig, axes = plt.subplots(len(ds), 2, figsize=(_REV_W, 1.55 * len(ds) + 0.7),
+                             squeeze=False, sharex=True)
+    for i, d in enumerate(ds):
+        for j, kind in enumerate(("feature", "topo")):
+            axL = axes[i][j]
+            axR = axL.twinx()
+            sub = dp[(dp.dataset == d) & (dp.kind == kind)]
+            for arch in ("rgcn", "hgat"):
+                s = sub[sub.arch == arch].sort_values("layers")
+                axL.plot(s.layers, s.speedup_measured, "-", color=_REV_ARCH_C[arch],
+                         lw=1.5, marker="o", ms=3)
+                axR.plot(s.layers, s.sign_flips.clip(lower=0.5), ":", color=FLIP_C[arch],
+                         lw=1.3, marker="^", ms=3)
+            axL.axhline(1.0, color="#999", lw=0.8, ls=":")
+            axR.set_yscale("log")
+            axR.spines["right"].set_visible(True)
+            axL.set_xticks([1, 2, 3, 4])
+            if i == 0:
+                axL.set_title(_REV_KIND[kind])
+            if j == 0:
+                axL.set_ylabel(f"{d}\nspeedup")
+            if j == 1:
+                axR.set_ylabel("flips")
+            if i == len(ds) - 1:
+                axL.set_xlabel("layers L")
+    import matplotlib.lines as ml
+    h = [ml.Line2D([], [], color=_REV_ARCH_C[a], lw=1.5, marker="o", ms=3,
+                   label=f"speedup {_REV_ARCH[a]}") for a in ("rgcn", "hgat")]
+    h += [ml.Line2D([], [], color=FLIP_C[a], ls=":", lw=1.3, marker="^", ms=3,
+                    label=f"flips {_REV_ARCH[a]}") for a in ("rgcn", "hgat")]
+    fig.legend(handles=h, frameon=False, ncol=2, loc="upper center")
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.55 / fig.get_figheight()))
+    return fig, "revision_latency_layers.pdf"
+
+
+def fig_revision_breakeven(frac=0.10):
+    be = _load("revision", "breakeven.csv")
+    if be is None:
+        return None
+    be = be[(be.frac - frac).abs() < 1e-9]
+    ds = _rev_datasets(be)
+    backends = [b for b in ("memory", "neo4j", "memgraph") if b in set(be.backend)]
+    BC = {"memory": C[0], "neo4j": C[1], "memgraph": C[2]}
+    MK = {"feature": "o", "topo": "s"}
+    finite = be.k_star[be.k_star != float("inf")]
+    top = (finite.max() if len(finite) else 10) * 4
+    fig, axes = plt.subplots(2, 1, figsize=(_REV_W, 4.2), sharex=True)
+    for ax, arch in zip(axes, ("rgcn", "hgat")):
+        for bi, b in enumerate(backends):
+            for ki, kind in enumerate(("feature", "topo")):
+                s = be[(be.arch == arch) & (be.backend == b) & (be.kind == kind)]
+                for r in s.itertuples():
+                    x = ds.index(r.dataset) + (bi - (len(backends) - 1) / 2) * 0.22 \
+                        + (ki - 0.5) * 0.08
+                    inf = r.k_star == float("inf")
+                    ax.scatter(x, top if inf else r.k_star, marker="x" if inf else MK[kind],
+                               color=BC[b], s=28, zorder=3,
+                               facecolors=BC[b] if inf or kind == "feature" else "none")
+        ax.axhline(top, color="#999", lw=0.8, ls=":")
+        ax.text(len(ds) - 0.5, top, "no break-even", ha="right", va="bottom", fontsize=9)
+        ax.set_yscale("log")
+        ax.set_ylim(0.7, top * 3)
+        ax.set_ylabel(f"{_REV_ARCH[arch]}: k*")
+    axes[-1].set_xticks(range(len(ds)), ds)
+    import matplotlib.lines as ml
+    h = [ml.Line2D([], [], color=BC[b], marker="o", ls="", label=b) for b in backends]
+    h += [ml.Line2D([], [], color="#555", marker="o", ls="", label="attribute Δ"),
+          ml.Line2D([], [], color="#555", marker="s", mfc="none", ls="", label="structure Δ")]
+    fig.suptitle(f"Break-even queries k* at {int(frac * 100)}%, L=2", fontsize=9)
+    fig.legend(handles=h, frameon=False, ncol=3, loc="upper center",
+               bbox_to_anchor=(0.5, 0.96))
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.7 / fig.get_figheight()))
+    return fig, "revision_breakeven.pdf"
+
+
+def fig_revision_speedup_vs_closure():
+    df = _rev_lat()
+    if df is None:
+        return None
+    MK = {"feature": "o", "topo": "s"}
+    fig, ax = plt.subplots(figsize=(_REV_W, 2.8))
+    for d in _rev_datasets(df):
+        for kind, m in MK.items():
+            s = df[(df.dataset == d) & (df.kind == kind)]
+            ax.scatter(s.closure_frac, s.speedup_measured, marker=m, s=12,
+                       color=_REV_DS_C[d], alpha=0.75,
+                       facecolors=_REV_DS_C[d] if kind == "feature" else "none")
+    ax.axhline(1.0, color="#999", lw=0.8, ls=":")
+    ax.set_yscale("log")
+    ax.set_xlabel(r"closure fraction $|S_L|/|V|$")
+    ax.set_ylabel("measured speedup")
+    import matplotlib.lines as ml
+    h = [ml.Line2D([], [], color=_REV_DS_C[d], marker="o", ls="", label=d)
+         for d in _rev_datasets(df)]
+    h += [ml.Line2D([], [], color="#555", marker="o", ls="", label="attribute"),
+          ml.Line2D([], [], color="#555", marker="s", mfc="none", ls="", label="structure")]
+    fig.legend(handles=h, frameon=False, ncol=3, loc="upper center",
+               handletextpad=0.2, columnspacing=0.8)
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.5 / fig.get_figheight()))
+    return fig, "revision_speedup_vs_closure.pdf"
+
+
+def fig_revision_rows_vs_flips():
+    df = _rev_lat()
+    if df is None:
+        return None
+    f = df[df.kind == "feature"]
+    MK = {"rgcn": "o", "hgat": "^"}
+    fig, axes = plt.subplots(1, 2, figsize=(_REV_W, 2.5), sharey=True)
+    for d in _rev_datasets(f):
+        for arch, m in MK.items():
+            s = f[(f.dataset == d) & (f.arch == arch)]
+            axes[0].scatter(s.rows_dirty_sum, s.ours_median_ms, marker=m, s=12,
+                            color=_REV_DS_C[d], alpha=0.75)
+            s = s[s.sign_flips > 0]       # L=1 has no hidden ReLU -> 0 flips
+            axes[1].scatter(s.sign_flips, s.ours_median_ms, marker=m, s=12,
+                            color=_REV_DS_C[d], alpha=0.75)
+    for ax in axes:
+        ax.set_xscale("log"); ax.set_yscale("log")
+    axes[0].set_xlabel("affected rows\n(sum over layers)")
+    axes[1].set_xlabel("sign flips")
+    axes[0].set_ylabel("INQ measured (ms)")
+    import matplotlib.lines as ml
+    h = [ml.Line2D([], [], color=_REV_DS_C[d], marker="o", ls="", label=d)
+         for d in _rev_datasets(f)]
+    h += [ml.Line2D([], [], color="#555", marker=MK[a], ls="", label=_REV_ARCH[a])
+          for a in MK]
+    fig.legend(handles=h, frameon=False, ncol=3, loc="upper center")
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.5 / fig.get_figheight()))
+    return fig, "revision_rows_vs_flips.pdf"
+
+
+def fig_v2_scaling_L2_latency():
+    """Original scaling_L2_latency, from MEASURED v2 medians (p10-p90 band)."""
+    return fig_revision_latency_L2("revision_v2", "v2_scaling_L2_latency.pdf")
+
+
+def fig_v2_scaling_L2_operations():
+    """Original scaling_L2_operations (FLOP proxy; v2 performs the same
+    operations as v1, so the proxy is unchanged) in the single-column layout."""
+    df = _scaling_df()
+    if df is None:
+        return None
+    d2 = df[df.layers == 2]
+    ds = [d for d in _REV_DS if d in set(d2.dataset)]
+    fig, axes = plt.subplots(len(ds), 2, figsize=(_REV_W, 1.55 * len(ds) + 0.6),
+                             squeeze=False, sharex=True)
+    for i, d in enumerate(ds):
+        for j, kind in enumerate(("feature", "topo")):
+            ax = axes[i][j]
+            sub = d2[(d2.dataset == d) & (d2.kind == kind)]
+            for arch, col in _REV_ARCH_C.items():
+                for m, ls in (("from_scratch", "-"), ("ours", "--")):
+                    s = sub[(sub.arch == arch) & (sub.method == m)].sort_values("pct")
+                    ax.plot(s.pct, s.flops, ls, color=col, lw=1.5, marker="o", ms=3)
+            ax.set_yscale("log")
+            if i == 0:
+                ax.set_title(_REV_KIND[kind])
+            if j == 0:
+                ax.set_ylabel(f"{d}\nFLOPs (proxy)")
+            if i == len(ds) - 1:
+                ax.set_xlabel("update size (%)")
+    import matplotlib.lines as ml
+    h = [ml.Line2D([], [], color=_REV_ARCH_C[a], ls=ls, lw=1.5, label=f"{lab}-{_REV_ARCH[a]}")
+         for a in ("rgcn", "hgat") for ls, lab in (("--", "INQ"), ("-", "scratch"))]
+    fig.legend(handles=h, frameon=False, ncol=2, loc="upper center")
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.55 / fig.get_figheight()))
+    return fig, "v2_scaling_L2_operations.pdf"
+
+
+def fig_v2_scaling_L2_memory(exp="revision_v2", fname="v2_scaling_L2_memory.png"):
+    """Memory row of the revised Fig. 3, in the ORIGINAL wide layout of
+    fig_scaling_L2 (2 rows = attribute / structure, 4 columns = datasets):
+    peak memory of ONE query (MB, log) vs update size at L=2, INQ vs from-scratch,
+    both archs; dotted grey = cache size (identical for both archs). Peak =
+    maxrss after the query minus RSS before it (`peak_over_current_MB`, median
+    over 5 fresh processes). Medians only, as in the original figure."""
+    from matplotlib.ticker import FuncFormatter, NullFormatter
+    import matplotlib.lines as ml
+    q = _load(exp, "query_memory.csv")
+    c = _load(exp, "cache_size_summary.csv")
+    if q is None or c is None:
+        return None
+    q = q[q.layers == 2].copy()
+    q["pct"] = (q.frac * 100).round().astype(int)
+    cache = c[(c.L == 2) & (c.arch == "rgcn")].set_index("dataset")["cache_MB"]
+    kinds = ["feature", "topo"]
+    klab = {"feature": "attribute", "topo": "structure"}
+    datasets = [x for x in _SCALE_DATASETS if x in set(q.dataset.unique())]
+    fmt = lambda v, _: (f"{v:,.0f}" if v >= 100 else f"{v:.0f}" if v >= 10 else f"{v:.1f}")
+    fig, axes = plt.subplots(len(kinds), len(datasets),
+                             figsize=(4.2 * len(datasets), 2.7 * len(kinds)), squeeze=False)
+    arch_color = {"rgcn": C[0], "hgat": C[3]}
+    method_ls = {"from_scratch": "-", "ours": "--"}
+    for i, kind in enumerate(kinds):
+        for j, ds in enumerate(datasets):
+            ax = axes[i][j]
+            sub = q[(q.dataset == ds) & (q.kind == kind)]
+            yvals = []
+            cache_note = ""
+            for method, ls in method_ls.items():
+                for arch, color in arch_color.items():
+                    s_ = sub[(sub.method == method) & (sub.arch == arch)].sort_values("pct")
+                    if s_.empty:
+                        continue
+                    ax.plot(s_.pct, s_.peak_over_current_MB, ls, color=color, lw=2,
+                            marker="o", ms=4)
+                    yvals.extend(s_.peak_over_current_MB.tolist())
+            if ds in cache.index and yvals:
+                cv = float(cache[ds])
+                if min(yvals) / 6 <= cv <= max(yvals) * 6:
+                    ax.axhline(cv, color="0.45", ls=":", lw=1.6)
+                    yvals.append(cv)
+                else:
+                    # far outside the query range (faers: 25 MB cache vs ~2 GB queries);
+                    # a line there would crush the curves, so it goes into the title.
+                    cache_note = f" (cache {cv:,.0f} MB)"
+            ax.set_yscale("log")
+            if yvals:
+                ticks = []
+                thresh = 1.04 if (max(yvals) / min(yvals) < 2) else 1.11
+                for v in sorted(set(round(v, 1) for v in yvals)):
+                    if not ticks or v > ticks[-1] * thresh:
+                        ticks.append(v)
+                ax.set_yticks(ticks)
+                ax.yaxis.set_major_formatter(FuncFormatter(fmt))
+                ax.yaxis.set_minor_formatter(NullFormatter())
+                ax.tick_params(axis="y", which="major", labelsize=5.5)
+                ax.tick_params(axis="y", which="minor", length=0)
+            ax.grid(True, which="major", lw=0.3, alpha=0.5)
+            if i == 0:
+                ax.set_title(ds + cache_note)
+            if i == len(kinds) - 1:
+                ax.set_xlabel("update size")
+            if j == 0:
+                ax.set_ylabel(f"{klab[kind]} Δ\npeak memory (MB)", fontsize=8)
+    h = [ml.Line2D([], [], color=C[0], ls="--", lw=2, marker="o", ms=4, label="INQ-RGCN"),
+         ml.Line2D([], [], color=C[0], ls="-", lw=2, marker="o", ms=4, label="from-scratch-RGCN"),
+         ml.Line2D([], [], color=C[3], ls="--", lw=2, marker="o", ms=4, label="INQ-hGAT"),
+         ml.Line2D([], [], color=C[3], ls="-", lw=2, marker="o", ms=4, label="from-scratch-hGAT"),
+         ml.Line2D([], [], color="0.45", ls=":", lw=1.6, label="cache size")]
+    fig.legend(handles=h, frameon=False, fontsize=8, ncol=5,
+               loc="upper center", bbox_to_anchor=(0.5, 1.0))
+    fig.suptitle("Peak memory comparison between from-scratch and INQ evaluation",
+                 y=1.03, fontsize=10)
+    fig.tight_layout()
+    return fig, fname
+
+def _v2_speedup_flips(kind, pct=10):
+    df = _rev_lat("revision_v2")
+    if df is None:
+        return None
+    dp = df[(df.pct == pct) & (df.kind == kind)]
+    ds = [d for d in _REV_DS if d in set(dp.dataset)]
+    FLIP_C = {"rgcn": C[2], "hgat": "#8c564b"}
+    fig, axes = plt.subplots(2, 2, figsize=(_REV_W, 3.9), squeeze=False)
+    for k, d in enumerate(ds):
+        axL = axes[k // 2][k % 2]
+        axR = axL.twinx()
+        sub = dp[dp.dataset == d]
+        for arch in ("rgcn", "hgat"):
+            s = sub[sub.arch == arch].sort_values("layers")
+            axL.plot(s.layers, s.speedup_measured, "-", color=_REV_ARCH_C[arch], lw=1.5,
+                     marker="o", ms=3)
+            axR.plot(s.layers, s.sign_flips.clip(lower=0.5), ":", color=FLIP_C[arch],
+                     lw=1.3, marker="^", ms=3)
+        axL.axhline(1.0, color="#999", lw=0.8, ls=":")
+        axR.set_yscale("log")
+        axR.spines["right"].set_visible(True)
+        axL.set_xticks([1, 2, 3, 4])
+        axL.set_title(d)
+        if k % 2 == 0:
+            axL.set_ylabel("measured speedup")
+        else:
+            axR.set_ylabel("sign flips")
+        if k // 2 == 1:
+            axL.set_xlabel("layers L")
+    import matplotlib.lines as ml
+    h = [ml.Line2D([], [], color=_REV_ARCH_C[a], lw=1.5, marker="o", ms=3,
+                   label=f"speedup {_REV_ARCH[a]}") for a in ("rgcn", "hgat")]
+    h += [ml.Line2D([], [], color=FLIP_C[a], ls=":", lw=1.3, marker="^", ms=3,
+                    label=f"flips {_REV_ARCH[a]}") for a in ("rgcn", "hgat")]
+    fig.legend(handles=h, frameon=False, ncol=2, loc="upper center")
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.55 / fig.get_figheight()))
+    return fig, f"v2_scaling_speedup_flips_{kind}_{pct}pct.pdf"
+
+
+def fig_v2_speedup_flips_feature():
+    return _v2_speedup_flips("feature")
+
+
+def fig_v2_speedup_flips_topo():
+    return _v2_speedup_flips("topo")
+
+
+def fig_v2_speedup_flips_eicu(pct=10):
+    """eICU only, structure | attribute delta side by side, in the layout and
+    panel size of the v1 scaling_speedup_flips_*.png (4.4 x 2.5 per panel), with
+    the measured v2 speedup instead of the latency_best_ms projection."""
+    import matplotlib.lines as ml
+    df = _rev_lat("revision_v2")
+    if df is None:
+        return None
+    BROWN = "#8c564b"
+    SPD_C, FLIP_C = {"rgcn": C[0], "hgat": C[3]}, {"rgcn": C[2], "hgat": BROWN}
+    kinds = {"topo": "structure", "feature": "attribute"}
+    fig, axes = plt.subplots(1, 2, figsize=(4.4 * 2, 2.5), squeeze=False)
+    for j, (kind, label) in enumerate(kinds.items()):
+        axL = axes[0][j]
+        axR = axL.twinx()
+        sub = df[(df.pct == pct) & (df.kind == kind) & (df.dataset == "eicu")]
+        for arch in ("rgcn", "hgat"):
+            s = sub[sub.arch == arch].sort_values("layers")
+            axL.plot(s.layers, s.speedup_measured, "-", color=SPD_C[arch], lw=2,
+                     marker="o", ms=4)
+            axR.plot(s.layers, s.sign_flips.clip(lower=0.5), "-", color=FLIP_C[arch],
+                     lw=1.6, marker="^", ms=5, alpha=0.9)
+        axL.set_xticks([1, 2, 3, 4]); axL.set_xlabel("layers L")
+        axL.axhline(1.0, color="#999", lw=0.8, ls=":")
+        axR.set_yscale("log")
+        axR.spines["right"].set_visible(True)
+        axL.set_title(f"eicu, {label} delta")
+        if j == 0:
+            axL.set_ylabel("measured speedup")
+        else:
+            axR.set_ylabel("sign-flips")
+    h = [ml.Line2D([], [], color=C[0], ls="-", lw=2, marker="o", ms=4, label="INQ-RGCN"),
+         ml.Line2D([], [], color=C[3], ls="-", lw=2, marker="o", ms=4, label="INQ-hGAT"),
+         ml.Line2D([], [], color=C[2], ls="-", lw=2, marker="^", ms=5, label="RGCN sign-flips"),
+         ml.Line2D([], [], color=BROWN, ls="-", lw=2, marker="^", ms=5, label="hGAT sign-flips")]
+    fig.legend(handles=h, frameon=False, fontsize=8, ncol=4,
+               loc="upper center", bbox_to_anchor=(0.5, 1.0))
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.3 / fig.get_figheight()))
+    return fig, f"v2_scaling_speedup_flips_eicu_{pct}pct.pdf"
+
+
+V2 = (fig_v2_scaling_L2_latency, fig_v2_scaling_L2_operations, fig_v2_scaling_L2_memory,
+      fig_v2_speedup_flips_feature, fig_v2_speedup_flips_topo, fig_v2_speedup_flips_eicu)
+
+
+REVISION = (fig_revision_memory, fig_revision_latency_L2, fig_revision_latency_layers,
+            fig_revision_breakeven, fig_revision_speedup_vs_closure,
+            fig_revision_rows_vs_flips)
+
+
+def main_revision(fns=REVISION, tag="figures_revision"):
+    os.makedirs(FIGURES, exist_ok=True)
+    made = 0
+    with plt.rc_context(_REV_RC):
+        for fn in fns:
+            out = fn()
+            if out is None:
+                print(f"skip {fn.__name__}: results not present yet")
+                continue
+            fig, name = out
+            fig.savefig(os.path.join(FIGURES, name))
+            plt.close(fig)
+            made += 1
+            print(f"wrote figures/{name}")
+    print(f"{'PASS' if made else 'FAIL'} {tag}: {made} written")
+    return 0 if made else 1
+
+
+# ------------------------------------------------------------------ sessions
+# R2.O2 (results/sessions): x = states visited k, one panel per dataset,
+# colour = arch (RGCN C[0], hGAT C[3]), ours dashed, from-scratch solid.
+_SESS_ARCH_C = {"rgcn": C[0], "hgat": C[3]}
+
+
+def _sess(exp):
+    df = _load(exp, "states.csv")
+    if df is None:
+        return None, None
+    if (df.exact_pass == False).any():          # exactness gate: never plot a failure
+        raise SystemExit(f"{exp}: states.csv has exactness failures; not plotting")
+    df["k"] = df.state_idx + 1
+    return df, _load(exp, "build.csv")
+
+
+def _sess_panels(df, nrows=1):
+    ds = [d for d in _SCALE_DATASETS if d in set(df.dataset)]
+    fig, axes = plt.subplots(nrows, len(ds), figsize=(4.2 * len(ds), 2.7 * nrows),
+                             squeeze=False)
+    return ds, fig, axes
+
+
+def _sess_legend(fig, handles):
+    fig.legend(handles=handles, frameon=False, fontsize=8, ncol=min(len(handles), 4),
+               loc="upper center", bbox_to_anchor=(0.5, 1.0))
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.18 * ((len(handles) + 3) // 4)
+                           / fig.get_figheight()))
+
+
+def _pts(x, ks):
+    return x if ks is None else x[x.k.isin(ks)]
+
+
+def _crossing(k, ours, base):
+    """Smallest k with cumulative ours <= cumulative baseline (None if never)."""
+    hit = [kk for kk, o, b in zip(k, ours, base) if o <= b]
+    return hit[0] if hit else None
+
+
+def fig_sessions_time(exp="sessions", ks=None):
+    import matplotlib.lines as ml
+    df, b = _sess(exp)
+    if df is None:
+        return None
+    cfg0 = df[df.config_idx == 0]
+    ds, fig, axes = _sess_panels(cfg0)
+    kstar = []
+    for j, d in enumerate(ds):
+        ax = axes[0][j]
+        for arch, col in _SESS_ARCH_C.items():
+            o = cfg0[(cfg0.dataset == d) & (cfg0.arch == arch) & (cfg0.method == "ours")
+                     & (cfg0.policy.astype(str) == "all")].sort_values("k")
+            s = cfg0[(cfg0.dataset == d) & (cfg0.arch == arch)
+                     & (cfg0.method == "scratch")].sort_values("k")
+            if o.empty or s.empty:
+                continue
+            b0 = float(o.build_s.iloc[0])
+            mk = dict(marker="." if ks else None, ms=5)
+            op, sp = _pts(o, ks), _pts(s, ks)
+            ax.plot([0] + op.k.tolist(), [b0] + op.cum_s.tolist(), "--", color=col, lw=2, **mk)
+            ax.plot([0] + sp.k.tolist(), [0] + sp.cum_s.tolist(), "-", color=col, lw=2, **mk)
+            k = _crossing(o.k, o.cum_s, s.cum_s)
+            kstar.append({"dataset": d, "arch": arch, "backend": "memory", "k_star": k or "",
+                          "n_states": len(o), "note": "" if k else f"> {len(o)}"})
+            if k:
+                ax.plot(k, float(o.cum_s[o.k == k].iloc[0]), "o", color=col, ms=6,
+                        mfc="white", mew=1.5)
+            st = cfg0[(cfg0.dataset == d) & (cfg0.arch == arch)
+                      & (cfg0.method == "store_scratch")].sort_values("k")
+            if b is not None and not st.empty:
+                bb = b[(b.dataset == d) & (b.arch == arch) & (b.backend == "neo4j")]
+                if not bb.empty:
+                    one = float(bb.download_s.iloc[0] + bb.tensors_s.iloc[0] + bb.build_s.iloc[0])
+                    oo = o[o.k <= st.k.max()]
+                    ours_st = one + (oo.cum_s - b0)
+                    keep = oo.k.isin(ks) if ks else oo.k > 0
+                    ax.plot([0] + oo.k[keep].tolist(), [one] + ours_st[keep].tolist(), "-.",
+                            color=col, lw=1.5, **mk)
+                    stp = _pts(st, ks)
+                    ax.plot([0] + stp.k.tolist(), [0] + stp.cum_s.tolist(), ":", color=col,
+                            lw=1.5, **mk)
+                    k = _crossing(oo.k, ours_st, st.cum_s)
+                    kstar.append({"dataset": d, "arch": arch, "backend": "neo4j",
+                                  "k_star": k or "", "n_states": len(st),
+                                  "note": "" if k else f"> {len(st)}"})
+                    if k:
+                        ax.plot(k, float(ours_st[oo.k == k].iloc[0]), "s", color=col, ms=5,
+                                mfc="white", mew=1.5)
+        ax.set_yscale("symlog", linthresh=0.1)
+        if ks:
+            ax.set_xlim(0, max(ks) * 1.03)
+        ax.set_title(d)
+        ax.set_xlabel("states visited k")
+        if j == 0:
+            ax.set_ylabel("cumulative time (s)")
+    if ks is None:      # k* from every state, written by the full figure only
+        pd.DataFrame(kstar).to_csv(os.path.join(RESULTS, exp, "kstar.csv"), index=False)
+    h = [ml.Line2D([], [], color=C[0], ls="--", lw=2, label="INQ-RGCN (retain all)"),
+         ml.Line2D([], [], color=C[0], ls="-", lw=2, label="from-scratch-RGCN"),
+         ml.Line2D([], [], color=C[3], ls="--", lw=2, label="INQ-hGAT (retain all)"),
+         ml.Line2D([], [], color=C[3], ls="-", lw=2, label="from-scratch-hGAT"),
+         ml.Line2D([], [], color="#555", ls="-.", lw=1.5, label="INQ, store-backed (Neo4j)"),
+         ml.Line2D([], [], color="#555", ls=":", lw=1.5, label="from-scratch, store-backed"),
+         ml.Line2D([], [], color="#555", ls="", marker="o", mfc="white", label="k* (crossing)")]
+    _sess_legend(fig, h)
+    return fig, "sessions_time.pdf"
+
+
+def fig_sessions_depth(exp="sessions", ks=None):
+    import matplotlib.lines as ml
+    df, _ = _sess(exp)
+    if df is None:
+        return None
+    deep = df[df.config_idx == 2]
+    if ks:
+        deep = deep[deep.k <= max(ks)]
+    if deep.empty:
+        return None
+    ds, fig, axes = _sess_panels(deep, 2)
+    pol_ls = {"all": "--", "1": (0, (5, 1, 1, 1))}
+    for j, d in enumerate(ds):
+        for arch, col in _SESS_ARCH_C.items():
+            sub = deep[(deep.dataset == d) & (deep.arch == arch)]
+            for pol, ls in pol_ls.items():
+                o = sub[(sub.method == "ours") & (sub.policy.astype(str) == pol)]
+                if o.empty:
+                    continue
+                g = o.groupby("depth")
+                med = g.wall_s.median() * 1e3
+                axes[0][j].plot(med.index, med, ls=ls, color=col, lw=2)
+                axes[0][j].fill_between(med.index, g.wall_s.quantile(0.1) * 1e3,
+                                        g.wall_s.quantile(0.9) * 1e3, color=col, alpha=0.12,
+                                        lw=0)
+                axes[1][j].plot(med.index, g.sign_flips.median(), ls=ls, color=col, lw=2)
+            s = sub[sub.method == "scratch"]
+            if not s.empty:
+                m = s.groupby("depth").wall_s.median() * 1e3
+                axes[0][j].plot(m.index, m, "-", color=col, lw=2)
+        axes[0][j].set_yscale("log")
+        axes[0][j].set_title(d)
+        axes[1][j].set_xlabel("path depth |D|")
+        axes[1][j].set_yscale("symlog", linthresh=1)
+    axes[0][0].set_ylabel("per-query latency (ms)")
+    axes[1][0].set_ylabel("sign flips")
+    h = [ml.Line2D([], [], color=C[0], ls="--", lw=2, label="INQ-RGCN retain all"),
+         ml.Line2D([], [], color=C[0], ls=pol_ls["1"], lw=2, label="INQ-RGCN base only"),
+         ml.Line2D([], [], color=C[0], ls="-", lw=2, label="from-scratch-RGCN"),
+         ml.Line2D([], [], color=C[3], ls="--", lw=2, label="INQ-hGAT retain all"),
+         ml.Line2D([], [], color=C[3], ls=pol_ls["1"], lw=2, label="INQ-hGAT base only"),
+         ml.Line2D([], [], color=C[3], ls="-", lw=2, label="from-scratch-hGAT")]
+    _sess_legend(fig, h)
+    return fig, "sessions_depth.pdf"
+
+
+def fig_sessions_memory(exp="sessions", ks=None):
+    """Memory held at k, both sides counted in full (RGCN; hGAT within ~2%).
+    Ours: the session starts from the base graph in the DB (Neo4j, as in the
+    store-backed runs), downloads it once and builds cache + index: k = 0 is
+    that peak (db + graph + cache + index). After it the DB copy and the edge
+    lists are not read again: node features + cache + index + retained states. From-scratch on a DB: the
+    stored graph + the log of the edits so far + per query the downloaded graph
+    and one forward pass (the base cache without the index)."""
+    import matplotlib.lines as ml
+    import numpy as np
+    df, b = _sess(exp)
+    if df is None:
+        return None
+    sz = _load("revision_v2", "store_size.csv")
+    gsz = _load(exp, "graph_size.csv")
+    if sz is None or gsz is None or b is None:
+        return None
+    cfg0 = df[(df.config_idx == 0) & (df.arch == "rgcn")]
+    ds, fig, axes = _sess_panels(cfg0)
+    pol_ls = {"all": "--", "16": ":", "1": (0, (5, 1, 1, 1))}
+    db_c = {"neo4j": "#333333", "memgraph": "#999999"}
+    MB = 2 ** 20
+    for j, d in enumerate(ds):
+        ax = axes[0][j]
+        sub = cfg0[cfg0.dataset == d]
+        g = gsz[gsz.dataset == d].iloc[0]
+        ix = float(b[(b.dataset == d) & (b.arch == "rgcn")
+                     & (b.backend == "memory")].index_MB.iloc[0])
+        base = sub[(sub.method == "ours") & (sub.policy.astype(str) == "1")]
+        cache0 = base.retained_bytes.min() / MB             # base cache + index
+        neo = sz[(sz.dataset == d) & (sz.backend == "neo4j")].iloc[0]
+        peak = neo.store_MB + g.x_MB + g.edges_MB + cache0  # build: db + downloaded graph
+        # every line as a full series over k = 0..n (crossings need every state)
+        ref = sub[sub.method == "scratch"].sort_values("k")
+        k = np.r_[0, ref.k.values]
+        ours = {pol: np.r_[peak, g.x_MB + sub[(sub.method == "ours")
+                                              & (sub.policy.astype(str) == pol)]
+                           .sort_values("k").retained_bytes.values / MB]
+                for pol in pol_ls}
+        scr = {}
+        for be in db_c:
+            r = sz[(sz.dataset == d) & (sz.backend == be)].iloc[0]
+            # k = 0: what the first query needs (db + downloaded graph + GNN), empty log
+            scr[be] = (r.store_MB + g.x_MB + g.edges_MB + cache0 - ix
+                       + np.r_[0.0, r.log_bytes / r.edges * ref.edges_applied_cum.values / MB])
+        # crossings per (policy, DB): the drop at k = 1 once the build is done, then
+        # the first crossing after it; later wobbles around the line are not marked
+        cross, kmax = [], max(ks) if ks else k[-1]
+        for pol, o in ours.items():
+            for be, sc in scr.items():
+                above = o > sc
+                flips = [i for i in range(1, len(k)) if above[i] != above[i - 1]
+                         and k[i] <= kmax]
+                mark = [i for i in flips if i == 1][:1] + [i for i in flips if i > 1][:1]
+                cross += [(i, o[i], db_c[be]) for i in mark]
+        sel = np.ones(len(k), bool) if ks is None else np.isin(k, (0, *ks, *(c[0] for c in cross)))
+        for pol, ls in pol_ls.items():
+            ax.plot(k[sel], ours[pol][sel], ls=ls, color=C[0], lw=2)
+        for be, colr in db_c.items():
+            ax.plot(k[sel], scr[be][sel], "-", color=colr, lw=2)
+        if ks:
+            grid = np.isin(k, (0, *ks))
+            for o in (*ours.values(), *scr.values()):
+                ax.plot(k[grid], o[grid], ".", color="#666", ms=3)
+        # crossing k in red next to the crossing; on the same DB line, ks closer than
+        # 8% of the axis share one label ("6,7")
+        groups = []
+        for i, y, colr in sorted(cross, key=lambda c: (c[2], c[0])):
+            g_ = groups[-1] if groups else None
+            if g_ and g_["c"] == colr and k[i] - g_["k"][-1] < 0.08 * kmax:
+                g_["k"].append(int(k[i])); g_["y"].append(y)
+            elif not g_ or int(k[i]) not in g_["k"] or g_["c"] != colr:
+                groups.append({"c": colr, "k": [int(k[i])], "y": [y]})
+        for g_ in groups:
+            ax.annotate(",".join(map(str, dict.fromkeys(g_["k"]))),
+                        (np.mean(g_["k"]), np.mean(g_["y"])), xytext=(4, 5),
+                        textcoords="offset points", fontsize=7, color="#c0392b",
+                        fontweight="bold", zorder=6,
+                        bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.8))
+        ax.set_yscale("linear" if ks else "log")
+        if ks:
+            ax.set_xlim(-2, max(ks) * 1.03)
+            ax.set_ylim(bottom=0)
+        ax.set_title(d)
+        ax.set_xlabel("states visited k")
+        if j == 0:
+            ax.set_ylabel("memory held (MB)")
+    h = [ml.Line2D([], [], color=C[0], ls=pol_ls["all"], lw=2, label="INQ retain all"),
+         ml.Line2D([], [], color=C[0], ls=pol_ls["16"], lw=2, label="INQ retain 16"),
+         ml.Line2D([], [], color=C[0], ls=pol_ls["1"], lw=2, label="INQ base only"),
+         ml.Line2D([], [], color=db_c["neo4j"], lw=2,
+                   label="from-scratch on Neo4j (db + log + graph + GNN)"),
+         ml.Line2D([], [], color=db_c["memgraph"], lw=2,
+                   label="from-scratch on Memgraph (db + WAL + graph + GNN)")]
+    _sess_legend(fig, h)
+    return fig, "sessions_memory.pdf"
+
+
+SESSIONS = (fig_sessions_time, fig_sessions_depth, fig_sessions_memory)
+
+
+SESSIONS_K100 = (*range(5, 31, 5), 50, 75, 100)   # coarse prefix grid, k <= 100
+
+
+def main_sessions(exp="sessions", ks=None):
+    os.makedirs(FIGURES, exist_ok=True)
+    made = 0
+    for fn in SESSIONS:
+        out = fn(exp, ks)
+        if out is None:
+            print(f"skip {fn.__name__}: results not present yet")
+            continue
+        fig, name = out
+        name = name if exp == "sessions" else f"{exp}_{name}"
+        if ks:
+            name = name.replace(".pdf", f"_k{max(ks)}.pdf")
+        fig.savefig(os.path.join(FIGURES, name))
+        plt.close(fig)
+        made += 1
+        print(f"wrote figures/{name}")
+    print(f"{'PASS' if made else 'FAIL'} figures_sessions: {made} written")
+    return 0 if made else 1
+
+
 def main():
+    import sys
+    if "--revision" in sys.argv:
+        return main_revision()
+    if "--v2" in sys.argv:
+        return main_revision(V2, "figures_v2")
+    if "--sessions-k100" in sys.argv:
+        return main_sessions(ks=SESSIONS_K100)
+    if "--sessions" in sys.argv:
+        return main_sessions()
     os.makedirs(FIGURES, exist_ok=True)
     made = []
     # functions returning one (fig, name), or a list of them

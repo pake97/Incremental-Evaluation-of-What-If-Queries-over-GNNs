@@ -71,10 +71,15 @@ def main():
                             methods = ["auto"]
                             if arch == "rgcn" and not is_topological(iv):
                                 methods.append("closure")  # auto == delta here
-                            for method in methods:
+                            for method, impl in ((m, i) for m in methods
+                                                 for i in cfg.get("impls", ["v1"])):
                                 res = incremental_forward(model, gs, cache, iv,
-                                                          schema, method=method)
+                                                          schema, method=method, impl=impl)
                                 rep_h = check(res.h, truth)
+                                rep_v1 = None
+                                if impl != "v1":   # v2 must also equal v1
+                                    rep_v1 = check(res.h, incremental_forward(
+                                        model, gs, cache, iv, schema, method=method).h)
                                 out_inc = read_query(model, res.h, task, pairs,
                                                      node_type=sp.label_nt,
                                                      src_type=sp.core_rel[0],
@@ -84,17 +89,19 @@ def main():
                                                      src_type=sp.core_rel[0],
                                                      dst_type=sp.core_rel[2])
                                 rep_o = check(out_inc, out_tru)
-                                ok = rep_h.passed and rep_o.passed
+                                ok = rep_h.passed and rep_o.passed and \
+                                    (rep_v1 is None or rep_v1.passed)
                                 all_ok &= ok
                                 n_checks += 1
                                 max_err = max(max_err, rep_h.max_abs_err, rep_o.max_abs_err)
                                 rows.append({
                                     "dataset": dataset, "arch": arch, "layers": L,
                                     "task": task, "kind": kind, "i": i,
-                                    "method": res.stats["method"],
+                                    "method": res.stats["method"], "impl": impl,
                                     "h_max_abs_err": rep_h.max_abs_err,
                                     "h_mean_abs_err": rep_h.mean_abs_err,
                                     "out_max_abs_err": rep_o.max_abs_err,
+                                    "vs_v1_max_abs_err": rep_v1.max_abs_err if rep_v1 else 0.0,
                                     "passed": ok,
                                     "nodes_recomputed": res.stats["nodes_recomputed"],
                                     "edges_touched": res.stats["edges_touched"],

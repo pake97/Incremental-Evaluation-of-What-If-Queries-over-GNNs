@@ -48,9 +48,12 @@ def _apply_delta(tx, adds, dels, cohort, pfx="", delta_val=1.0):
     for (s, r, d), pairs in adds.items():
         tx.run(f"UNWIND $p AS p MATCH (a:`{pfx}{s}`{{idx:p[0]}}),(b:`{pfx}{d}`{{idx:p[1]}}) "
                f"CREATE (a)-[:`{r}`]->(b)", p=pairs).consume()
+    # LIMIT inside a per-row subquery: one edge per pair (a bare `WITH e LIMIT 1`
+    # after UNWIND limits the whole query, i.e. deletes one edge in total)
     for (s, r, d), pairs in dels.items():
-        tx.run(f"UNWIND $p AS p MATCH (a:`{pfx}{s}`{{idx:p[0]}})-[e:`{r}`]->(b:`{pfx}{d}`{{idx:p[1]}}) "
-               f"WITH e LIMIT 1 DELETE e", p=pairs).consume()
+        tx.run(f"UNWIND $p AS p CALL {{ WITH p MATCH (a:`{pfx}{s}`{{idx:p[0]}})"
+               f"-[e:`{r}`]->(b:`{pfx}{d}`{{idx:p[1]}}) WITH e LIMIT 1 DELETE e }}",
+               p=pairs).consume()
     for nt, ids in cohort.items():
         tx.run(f"UNWIND $ids AS i MATCH (n:`{pfx}{nt}`{{idx:i}}) "
                f"SET n.f = coalesce(n.f,0.0)+$dv", ids=ids, dv=delta_val).consume()

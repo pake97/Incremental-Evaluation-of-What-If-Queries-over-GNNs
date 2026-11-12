@@ -42,7 +42,7 @@ def closure_forward(model, cache: ForwardCache, view,
     L = enc.num_layers
     N = {nt: cache.h[0][nt].size(0) for nt in enc.node_types}
     stats = {"method": "closure", "nodes_recomputed": 0, "edges_touched": 0,
-             "sign_flips": 0, "dirty_frontier": []}
+             "edges_scanned": 0, "sign_flips": 0, "dirty_frontier": []}
 
     # edited adjacency, forward + derived reverse
     ei_all = {}
@@ -50,6 +50,7 @@ def closure_forward(model, cache: ForwardCache, view,
         ei = view.edge_index_dict[(s, r, d)]
         ei_all[(s, r, d)] = ei
         ei_all[(d, "rev_" + r, s)] = ei.flip(0)
+        stats["edges_scanned"] += ei.size(1)          # the flip reads every edge
 
     def mask_of(rows_by_nt):
         m = {nt: torch.zeros(N[nt], dtype=torch.bool) for nt in enc.node_types}
@@ -79,6 +80,7 @@ def closure_forward(model, cache: ForwardCache, view,
             ei = ei_all[et]
             if ei.numel() and bool(dirty[s].any()):
                 m = dirty[s][ei[0]]
+                stats["edges_scanned"] += ei.size(1)
                 if bool(m.any()):
                     nxt[d][ei[1][m]] = True
 
@@ -101,6 +103,7 @@ def closure_forward(model, cache: ForwardCache, view,
                 ei = ei_all[et]
                 if ei.numel():
                     m = nxt[nt][ei[1]]
+                    stats["edges_scanned"] += ei.size(1)
                     e_sel = ei[:, m]
                 else:
                     e_sel = ei
