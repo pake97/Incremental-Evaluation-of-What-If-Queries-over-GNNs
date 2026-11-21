@@ -59,7 +59,9 @@ def run_trace(model, gs: GraphState, schema: GraphSchema, trace: Trace,
     from the ancestor's OverlayCache. n_states evaluates a prefix of the visit
     order. account=True adds retained_bytes per row (untimed): base cache +
     index + everything reachable from the materialized caches (an evicted
-    ancestor stays counted while a retained child's overlays point into it)."""
+    ancestor stays counted while a retained child's overlays point into it);
+    reuse rungs also add query_bytes: index + what this query's own cache
+    reaches (its new overlays, the ancestor chain it resumed from, base cache)."""
     assert rung in RUNGS and impl in ("v1", "v2")
     arch = model.cfg["model_type"]
     rows = []
@@ -128,6 +130,8 @@ def run_trace(model, gs: GraphState, schema: GraphSchema, trace: Trace,
                                   if k != "dirty_frontier"}}
         if acct is not None:
             row["retained_bytes"] = acct.bytes(caches)
+            if rung == "reuse":
+                row["query_bytes"] = _Retained(index).bytes({state: new_cache})
         if check_every and si % check_every == 0:
             from src.eval.exactness import check
             rep = check(h, whatif_forward(model, gs, iv, schema))

@@ -179,7 +179,7 @@ def _ours_setting(cfg, st, tr, cum_e, model, ds, arch, ci, todo, n, rows, builds
                                      max_caches=mc, impl=cfg["impl"], **kw)
         run(n_states=1)                                    # warm-up, discarded
         reps = []
-        for r in range(cfg["reps_ours"][pol]):
+        for r in range(cfg["reps_ours"].get(pol, 1)):   # policies not in the config: 1 rep
             reps.append(run(n_states=n, account=(r == 0),
                             check_every=cfg["check_every"] if r == 0 else 0))
             if r == 0:
@@ -199,6 +199,7 @@ def _ours_setting(cfg, st, tr, cum_e, model, ds, arch, ci, todo, n, rows, builds
                         "cum_s": float(np.median(cums[:, i])),
                         "build_s": float(np.median(build)) if i == 0 else "",
                         "retained_bytes": row["retained_bytes"],
+                        "query_bytes": row.get("query_bytes", ""),
                         "edges_applied_cum": cum_e[i],
                         "exact_max_abs_err": row.get("exact_max_abs_err", ""),
                         "exact_pass": row.get("exact_pass", "")})
@@ -271,6 +272,9 @@ def part_store(cfg, settings, traces, cis, n_cap):
     n = min(sc["n_states"], n_cap)
     c = cfg["configs"][ci]
     dbc = yaml.safe_load(open(cfg["db_config"]))[sc["backend"]]
+    # Neo4j rows keep the original method name; other backends get their own.
+    # Undo-memory columns come from Neo4j's SHOW TRANSACTIONS only.
+    meth = "store_scratch" if sc["backend"] == "neo4j" else f"store_scratch_{sc['backend']}"
     rows, builds = read_rows("states.csv"), read_rows("build.csv")
     done = _done(rows, n)
     try:
@@ -285,7 +289,7 @@ def part_store(cfg, settings, traces, cis, n_cap):
     T = time.perf_counter
     for ds in [d for d in sc["datasets"] if d in cfg["datasets"]]:
         archs = [a for a in cfg["archs"] if has_ckpt(ds, a, cfg["layers"], cfg["task"])
-                 and (ds, a, cname(c), "store_scratch", "") not in done]
+                 and (ds, a, cname(c), meth, "") not in done]
         if not archs:
             continue
         st = settings(ds)
@@ -326,7 +330,7 @@ def part_store(cfg, settings, traces, cis, n_cap):
                 with store._session() as s:
                     tx = s.begin_transaction(metadata={"rcf": tag})
                     t0 = T(); _apply_delta(tx, adds, dels, coh, pfx); ta = T() - t0
-                    u_apply = _tx_bytes(store, tag)                   # untimed
+                    u_apply = _tx_bytes(store, tag) if meth == "store_scratch" else ("", "")                   # untimed
                     t0 = T(); r = _download_raw(tx, st.schema, pfx); td = T() - t0
                     t0 = T()
                     xx, ee = _build_tensors(r, st.schema)
@@ -334,7 +338,7 @@ def part_store(cfg, settings, traces, cis, n_cap):
                         xx[nt] = xx[nt] + d
                     tt = T() - t0
                     t0 = T(); h = encode(model, GraphView(xx, ee, {})); tf = T() - t0
-                    u_end = _tx_bytes(store, tag)                     # untimed
+                    u_end = _tx_bytes(store, tag) if meth == "store_scratch" else ("", "")                     # untimed
                     t0 = T(); tx.rollback(); trb = T() - t0
                 rec = {"apply_s": ta, "download_s": td, "tensors_s": tt, "forward_s": tf,
                        "rollback_s": trb, "wall_s": ta + td + tt + tf + trb,
@@ -357,11 +361,11 @@ def part_store(cfg, settings, traces, cis, n_cap):
             for i in range(n):
                 rec = one(i, i % cfg["check_every"] == 0)
                 acc += rec["wall_s"]
-                new.append({**_base(ds, arch, c, ci, "store_scratch", ""), "state_idx": i,
+                new.append({**_base(ds, arch, c, ci, meth, ""), "state_idx": i,
                             "depth": len(tr.order[i]), "backend": sc["backend"], **rec,
                             "cum_s": acc, "edges_applied_cum": cum_e[i]})
-                _abort_on_fail(new[-1:], f"{ds} {arch} store_scratch")
-            _save(rows, new, (ds, arch, cname(c), "store_scratch", ""))
+                _abort_on_fail(new[-1:], f"{ds} {arch} {meth}")
+            _save(rows, new, (ds, arch, cname(c), meth, ""))
             ph = {k: statistics.median(r[k] for r in new) for k in
                   ("apply_s", "download_s", "tensors_s", "forward_s", "rollback_s")}
             print(f"store {ds:8} {arch}: per state " +
@@ -396,10 +400,20 @@ def main():
     ap.add_argument("--n-states", type=int, default=None,
                     help="evaluate this prefix of the trace (trace is always n_states long)")
     ap.add_argument("--exp", default="sessions", help="results/<exp>/")
+    ap.add_argument("--archs", nargs="+", default=None)
+    ap.add_argument("--policies", nargs="+", default=None,
+                    help="override policies (max_caches; 'all' or an integer)")
+    ap.add_argument("--store-backend", default=None, help="override store.backend (db.yaml key)")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.datasets:
         cfg["datasets"] = args.datasets
+    if args.archs:
+        cfg["archs"] = args.archs
+    if args.policies:
+        cfg["policies"] = [p if p == "all" else int(p) for p in args.policies]
+    if args.store_backend:
+        cfg["store"]["backend"] = args.store_backend
     global EXP, OUT
     EXP, OUT = args.exp, os.path.join(RESULTS, args.exp)
     os.makedirs(OUT, exist_ok=True)

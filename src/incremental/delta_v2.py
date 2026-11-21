@@ -12,6 +12,14 @@ Data-access changes only:
     then self term, relation by relation), so the sums are v1's;
   * every cached layer, the last included, is a RowOverlay; the returned final
     layer is densified transiently (not retained by the cache).
+
+Edge edits (v2 only, method="delta" on a topological Δ; the mean aggregator is
+sum / in-degree, so it stays linear given the new degree):
+  * kept base edges from changed sources carry W·Δh (deleted columns skipped);
+    added edges carry W·h' (the source's new state), deleted edges -W·h;
+  * a destination whose in-degree changes gets (num + Δnum)/deg' - num/deg,
+    with num rebuilt from its base in-edges (the cache keeps h and z, not the
+    per-relation sums); every other destination gets Δnum/deg.
 """
 from __future__ import annotations
 
@@ -21,7 +29,7 @@ import torch
 import torch.nn.functional as F
 
 from src.incremental.delta import _is_uniform
-from src.incremental.index import ragged
+from src.incremental.index import in_sorted, ragged
 from src.incremental.overlay import OverlayCache, RowOverlay, dense, gather
 from src.models.model import _key
 
@@ -38,16 +46,55 @@ def delta_forward_v2(model, cache, gs, iv, index):
              "dirty_frontier": []}
     raw = lambda layer: getattr(layer, "raw", layer)
 
-    def out_edges(et, r):
-        """(dst ids, owner index into r, in-degree source) of edges leaving r."""
+    def fwd_of(et):
         s, rel, d = et
-        if rel.startswith("rev_"):
-            ix = index.rels[(d, rel[4:], s)]
+        return ((d, rel[4:], s), True) if rel.startswith("rev_") else (et, False)
+
+    def out_edges(et, r):
+        """(dst ids, owner index into r, in-degree source) of kept edges leaving r."""
+        f, rev = fwd_of(et)
+        ix = index.rels[f]
+        if rev:
             pos, own = ragged(ix.csc_ptr, r)
-            return ix.csc_src[pos], own, ix.csr_ptr      # in-deg in reverse = out-deg fwd
-        ix = index.rels[et]
-        pos, own = ragged(ix.csr_ptr, r)
-        return ix.csr_dst[pos], own, ix.csc_ptr
+            dst, eid, dptr = ix.csc_src[pos], ix.csc_eid[pos], ix.csr_ptr
+        else:
+            pos, own = ragged(ix.csr_ptr, r)
+            dst, eid, dptr = ix.csr_dst[pos], ix.csr_eid[pos], ix.csc_ptr
+        if f in dels:                                   # skip deleted base columns
+            k = ~in_sorted(eid, dels[f])
+            dst, own = dst[k], own[k]
+        return dst, own, dptr
+
+    def in_edges(et, r):
+        """(src ids, owner index into r) of the BASE in-edges of rows r."""
+        f, rev = fwd_of(et)
+        ix = index.rels[f]
+        if rev:
+            pos, own = ragged(ix.csr_ptr, r)
+            return ix.csr_dst[pos], own
+        pos, own = ragged(ix.csc_ptr, r)
+        return ix.csc_src[pos], own
+
+    # edge edits per relation (both directions): added / deleted (src, dst) and Δdeg
+    dels = {et: torch.sort(c).values for et, c in iv.del_cols.items()
+            if c is not None and c.numel()}
+    edits = {}
+    for et in enc.all_types:
+        f, rev = fwd_of(et)
+        a = iv.add_edges.get(f)
+        a = a if a is not None and a.numel() else None
+        dl = gs.edge_index[f][:, dels[f]] if f in dels else None
+        if a is None and dl is None:
+            continue
+        if rev:
+            a = a.flip(0) if a is not None else None
+            dl = dl.flip(0) if dl is not None else None
+        ddeg = torch.zeros(N[et[2]], dtype=torch.long)
+        if a is not None:
+            ddeg.index_add_(0, a[1], torch.ones(a.size(1), dtype=torch.long))
+        if dl is not None:
+            ddeg.index_add_(0, dl[1], -torch.ones(dl.size(1), dtype=torch.long))
+        edits[et] = (a, dl, ddeg)
 
     # layer 0: Δ through the input projection (bias cancels)
     rows, dh = {}, {}
@@ -77,6 +124,11 @@ def delta_forward_v2(model, cache, gs, iv, index):
                     hit.setdefault(d, torch.zeros(N[d], dtype=torch.bool))[e_dst] = True
             if d in rows:
                 hit.setdefault(d, torch.zeros(N[d], dtype=torch.bool))[rows[d]] = True
+            if et in edits:
+                m = hit.setdefault(d, torch.zeros(N[d], dtype=torch.bool))
+                for e in edits[et][:2]:
+                    if e is not None:
+                        m[e[1]] = True
         u = {nt: m.nonzero().squeeze(1) for nt, m in hit.items()}
         lut = {}
         for nt, un in u.items():
@@ -85,10 +137,46 @@ def delta_forward_v2(model, cache, gs, iv, index):
 
         # pass 2: accumulate Δz on the union rows, in v1's (relation) order
         dz = {nt: torch.zeros(un.numel(), hidden) for nt, un in u.items()}
+        h_cur, h_base = new_h[li], raw(cache.h[li])
         for et in enc.all_types:
             s, _, d = et
             cell = layer[_key(et)]
-            if et in edges:
+            if et in edits:
+                # Δnum on u[d]: kept edges (W·Δh), added (W·h'), deleted (-W·h)
+                add, dl, ddeg = edits[et]
+                W = cell.lin_msg.weight
+                dnum = torch.zeros(u[d].numel(), hidden)
+                n_e = 0
+                if et in edges:
+                    e_dst, own, dptr = edges[et]
+                    dnum.index_add_(0, lut[d][e_dst], F.linear(dh[s], W)[own])
+                    n_e += e_dst.numel()
+                for e, sign, src_h in ((add, 1.0, h_cur), (dl, -1.0, h_base)):
+                    if e is not None:
+                        dnum.index_add_(0, lut[d][e[1]], sign * F.linear(gather(src_h[s], e[0]), W))
+                        n_e += e.size(1)
+                f, rev = fwd_of(et)
+                dptr = index.rels[f].csr_ptr if rev else index.rels[f].csc_ptr
+                deg = (dptr[u[d] + 1] - dptr[u[d]]).float()
+                dd = ddeg[u[d]]
+                chg = (dd != 0).nonzero().squeeze(1)
+                contrib = dnum / deg.clamp(min=1e-8).unsqueeze(-1)
+                if chg.numel():
+                    # rows whose in-degree changes: rebuild the base sum, renormalise
+                    src, own = in_edges(et, u[d][chg])
+                    num = torch.zeros(chg.numel(), hidden).index_add_(
+                        0, own, F.linear(gather(h_base[s], src), W))
+                    n_e += src.numel()
+                    d0, d1 = deg[chg].clamp(min=1e-8), deg[chg] + dd[chg]
+                    # a row left with no in-edges aggregates to exactly 0 (from
+                    # scratch: empty sum); num + Δnum is only a float residual there
+                    new = torch.where((d1 > 0).unsqueeze(-1),
+                                      (num + dnum[chg]) / d1.clamp(min=1e-8).unsqueeze(-1),
+                                      torch.zeros(()))
+                    contrib[chg] = new - num / d0.unsqueeze(-1)
+                dz[d] += contrib
+                stats["edges_touched"] += int(n_e)
+            elif et in edges:
                 e_dst, own, dptr = edges[et]
                 inv = lut[d][e_dst]
                 deg = (dptr[u[d] + 1] - dptr[u[d]]).float().clamp(min=1e-8)

@@ -247,11 +247,23 @@ class Ours:
 class NeutronRT:
     name = "neutronrt"
 
-    def __init__(self, model, gs, cache):
-        self.model, self.gs, self._cache = model, gs, cache
+    def __init__(self, model, gs, cache, impl="reference"):
+        """impl='optimised': same arithmetic on the v2 primitives (linprop_v2 for
+        RGCN, the v2 closure for hGAT); `cache` must be the base ForwardCache."""
+        self.model, self.gs, self._cache, self.impl = model, gs, cache, impl
         self.rgcn = model.cfg["model_type"] == "rgcn"
 
     def apply(self, cache, iv):
+        if self.impl == "optimised":
+            if self.rgcn:
+                from src.baselines.linprop_v2 import linprop_v2
+                from src.incremental.index import get_index
+                return linprop_v2(cache, iv, "new", get_index(self._cache))
+            res = incremental_forward(self.model, self.gs, self._cache, iv,
+                                      method="closure", impl="v2")
+            Counters.add_edges(res.stats["edges_touched"])
+            Counters.add_verts(res.stats["nodes_recomputed"])
+            return res.h
         if self.rgcn:
             return _linprop(cache, iv, degree_mode="new")
         # hGAT: exact constrained closure recompute
@@ -268,8 +280,12 @@ class NeutronRT:
 class Ripple:
     name = "ripple"
 
-    def __init__(self, model, gs, cache):
-        self.model, self.gs = model, gs
+    def __init__(self, model, gs, cache, impl="reference"):
+        self.model, self.gs, self._cache, self.impl = model, gs, cache, impl
 
     def apply(self, cache, iv):
+        if self.impl == "optimised":
+            from src.baselines.linprop_v2 import linprop_v2
+            from src.incremental.index import get_index
+            return linprop_v2(cache, iv, "frozen", get_index(self._cache))
         return _linprop(cache, iv, degree_mode="frozen")

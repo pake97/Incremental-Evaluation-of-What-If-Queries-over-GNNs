@@ -127,16 +127,98 @@ def test_delta_within_float32_noise_of_double_reference(env, impl):
             f"delta {delta_err:.2e} exceeds float32 noise {noise:.2e} — possible bug"
 
 
-@pytest.mark.parametrize("impl", IMPLS)
-def test_delta_refuses_topological(env, impl):
+@pytest.mark.parametrize("arch,impl", [("rgcn", "v1"), ("hgat", "v1")])
+def test_delta_refuses_topological(env, arch, impl):
+    """v1 delta is RGCN feature-only (v2 also takes edge edits and hGAT)."""
     data, schema, gs = env
-    model = _model("rgcn", 2)
+    model = _model(arch, 2)
     cache = build_cache(model, gs.base_view())
     g = torch.Generator().manual_seed(0)
     from src.explore.sampler import sample_topo_iv
     iv = sample_topo_iv(schema, gs, g, TR)
     with pytest.raises(ValueError, match="delta path requires"):
         incremental_forward(model, gs, cache, iv, schema, method="delta", impl=impl)
+
+
+@pytest.mark.parametrize("L", [1, 2, 4])
+@pytest.mark.parametrize("kind", ["topo", "mixed"])
+def test_v2_delta_edge_edits_equal_from_scratch(env, L, kind):
+    """RGCN v2 delta on edge edits (degree-renormalised): exact vs from-scratch,
+    output and returned cache."""
+    data, schema, gs = env
+    model = _model("rgcn", L)
+    cache = build_cache(model, gs.base_view())
+    for iv in _random_ivs(schema, gs, kind, n=3, seed=hash(("dtopo", L, kind)) % 2**31):
+        truth = whatif_forward(model, gs, iv, schema)
+        res = incremental_forward(model, gs, cache, iv, schema, method="delta", impl="v2")
+        assert res.stats["method"] == "delta"
+        assert_exact(res.h, truth)
+        assert_exact(res.cache.h_final, truth)
+
+
+@pytest.mark.parametrize("L", [1, 2, 4])
+@pytest.mark.parametrize("kind", ["feature", "topo", "mixed"])
+def test_v2_hgat_attention_delta_equals_from_scratch(env, L, kind):
+    """hGAT attention Δ (cached softmax sums): exact vs from-scratch, output and
+    returned cache, fixed seeds."""
+    data, schema, gs = env
+    model = _model("hgat", L)
+    cache = build_cache(model, gs.base_view())
+    for iv in _random_ivs(schema, gs, kind, n=4, seed=L * 7 + len(kind)):
+        truth = whatif_forward(model, gs, iv, schema)
+        res = incremental_forward(model, gs, cache, iv, schema, method="delta", impl="v2")
+        assert res.stats["method"] == "delta"
+        assert_exact(res.h, truth)
+        assert_exact(res.cache.h_final, truth)
+
+
+@pytest.mark.parametrize("kind", ["feature", "topo"])
+@pytest.mark.parametrize("frac", [0.05, 0.3])
+def test_v2_hgat_attention_delta_large(env, kind, frac):
+    """Pilot sizes: exact, and fewer edges than the closure."""
+    from src.explore.sampler import sample_feature_iv, sample_topo_iv
+    data, schema, gs = env
+    model = _model("hgat", 2)
+    cache = build_cache(model, gs.base_view())
+    g = torch.Generator().manual_seed(42)
+    iv = (sample_feature_iv(schema, gs, g, NT, round(frac * gs.num_nodes[NT])) if kind == "feature"
+          else sample_topo_iv(schema, gs, g, TR, n_add=round(frac * gs.edge_index[TR].size(1)),
+                              n_del=round(frac * gs.edge_index[TR].size(1))))
+    res = incremental_forward(model, gs, cache, iv, method="delta", impl="v2")
+    assert_exact(res.h, whatif_forward(model, gs, iv))
+    clo = incremental_forward(model, gs, cache, iv, impl="v2")
+    assert res.stats["edges_touched"] < clo.stats["edges_touched"]
+
+
+def test_v2_delta_edge_edits_many_seeds(env):
+    """Fixed seeds (the hash()-seeded tests vary per process): small random edge
+    edits, including rows that lose every in-edge of a relation."""
+    from src.explore.sampler import sample_topo_iv
+    data, schema, gs = env
+    model = _model("rgcn", 2)
+    cache = build_cache(model, gs.base_view())
+    for seed in range(60):
+        g = torch.Generator().manual_seed(seed)
+        n = int(torch.randint(1, 50, (1,), generator=g))
+        iv = sample_topo_iv(schema, gs, g, TR, n_add=n, n_del=n)
+        res = incremental_forward(model, gs, cache, iv, method="delta", impl="v2")
+        assert_exact(res.h, whatif_forward(model, gs, iv))
+
+
+@pytest.mark.parametrize("frac", [0.05, 0.3])
+def test_v2_delta_edge_edits_large(env, frac):
+    """Pilot sizes (5% / 30% of the transfer edges added and deleted): exact, and
+    fewer edges than the closure."""
+    from src.explore.sampler import sample_topo_iv
+    data, schema, gs = env
+    model = _model("rgcn", 2)
+    cache = build_cache(model, gs.base_view())
+    n = round(frac * gs.edge_index[TR].size(1))
+    iv = sample_topo_iv(schema, gs, torch.Generator().manual_seed(42), TR, n_add=n, n_del=n)
+    res = incremental_forward(model, gs, cache, iv, method="delta", impl="v2")
+    assert_exact(res.h, whatif_forward(model, gs, iv))
+    clo = incremental_forward(model, gs, cache, iv, impl="v2")
+    assert res.stats["edges_touched"] < clo.stats["edges_touched"]
 
 
 @pytest.mark.parametrize("arch", ["rgcn", "hgat"])
@@ -207,3 +289,41 @@ def test_v2_refuses_non_base_topology(env):
 def _empty_iv():
     from src.data.graph_state import Intervention
     return Intervention()
+
+
+@pytest.mark.parametrize("arch", ["rgcn", "hgat"])
+@pytest.mark.parametrize("L", [1, 2, 4])
+@pytest.mark.parametrize("kind", ["feature", "topo", "mixed"])
+@pytest.mark.parametrize("dense_frac", [0.0, 0.5])
+def test_v2_closure_dense_blocks_equal_from_scratch(env, arch, L, kind, dense_frac):
+    """dense_frac: types recomputed in full (0.0 = every touched type), exact
+    vs from-scratch, output and returned cache; fallback=0 (always scratch) too."""
+    data, schema, gs = env
+    model = _model(arch, L)
+    cache = build_cache(model, gs.base_view())
+    for iv in _random_ivs(schema, gs, kind, n=4, seed=L * 11 + len(kind) + int(dense_frac * 10)):
+        truth = whatif_forward(model, gs, iv, schema)
+        res = incremental_forward(model, gs, cache, iv, schema, method="closure", impl="v2",
+                                  dense_frac=dense_frac)
+        assert_exact(res.h, truth)
+        assert_exact(res.cache.h_final, truth)
+        fb = incremental_forward(model, gs, cache, iv, schema, method="closure", impl="v2",
+                                 fallback=0.0)
+        assert fb.stats["method"] == "scratch"
+        assert_exact(fb.h, truth)
+
+
+@pytest.mark.parametrize("kind", ["feature", "topo"])
+@pytest.mark.parametrize("frac", [0.05, 0.3])
+def test_v2_closure_dense_blocks_large(env, kind, frac):
+    """Pilot sizes, where whole types saturate."""
+    from src.explore.sampler import sample_feature_iv, sample_topo_iv
+    data, schema, gs = env
+    model = _model("hgat", 2)
+    cache = build_cache(model, gs.base_view())
+    g = torch.Generator().manual_seed(42)
+    n = round(frac * gs.edge_index[TR].size(1))
+    iv = (sample_feature_iv(schema, gs, g, NT, round(frac * gs.num_nodes[NT])) if kind == "feature"
+          else sample_topo_iv(schema, gs, g, TR, n_add=n, n_del=n))
+    res = incremental_forward(model, gs, cache, iv, method="closure", impl="v2", dense_frac=0.5)
+    assert_exact(res.h, whatif_forward(model, gs, iv, schema))

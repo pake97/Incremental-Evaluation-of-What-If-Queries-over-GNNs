@@ -730,29 +730,53 @@ def fig_db_pipeline():
     return figs
 
 
-def fig_db_finbench_2x2(only=None):
+def _v2_df(df, batched=False):
+    """db_pipeline_v2 rows in the July column names: reference baselines (as published,
+    user 2026-11-18), medians; NeutronRT one-shot as 'neutronrt' (batched kept as
+    'neutronrt_batched' if asked)."""
+    df = df[df.impl.isin(["-", "reference"]) & (batched | (df.method != "neutronrt"))]
+    return df.replace({"method": {"naive": "from_scratch", "inq": "ours",
+                                  "neutronrt": "neutronrt_batched",
+                                  "neutronrt_oneshot": "neutronrt"}}).rename(columns={
+        "t_gnn_median_ms": "t_gnn_ms", "t_apply_median_ms": "t_apply_ms",
+        "t_rollback_median_ms": "t_rollback_ms", "t_download_median_ms": "t_download_ms"})
+
+
+def fig_db_finbench_2x2(only=None, step=None, exp="db_pipeline"):
     """FinBench focus: 2x2 panels (rows=DB neo4j/memgraph, cols=kind feature/topo),
     download removed (update+gnn only, like nodownload), with the UPDATE step (orange)
     stacked ON TOP of the GNN step (blue). ours = gnn only (no DB update)."""
-    df = _load("db_pipeline")
+    df = _load(exp)
     if df is None or "arch" not in df.columns:
         return []
     df = df[df.dataset == "finbench"]
     if df.empty:
         return []
-    APPROACH = [("from_scratch", "from-scratch"), ("ripple", "Ripple"),
+    v2 = exp.startswith("db_pipeline_v2")     # measured run: same layout, naive-GNN, deviation marks
+    if v2:
+        df = _v2_df(df)
+        df = df[df.pct != 1.0]      # 1% dropped from the FinBench figures (user, 2026-11-18)
+    APPROACH = [("from_scratch", "naive-GNN" if v2 else "from-scratch"), ("ripple", "Ripple"),
                 ("neutronrt", "NeutronRT"), ("ours", "INQ")]
     # gnn first (bottom), update second (top) — update orange sits above gnn blue.
-    STEP = [("gnn", C[0]), ("update", C[2])]
+    STEP = [(n, c) for n, c in (("gnn", C[0]), ("update", C[2])) if step in (None, n)]
+    store = step in ("store", "update_rollback")   # store side only (INQ pays none)
+    if store:
+        STEP = [(n, c) for n, c in (("download", C[3]), ("update", C[2]), ("rollback", C[4]))
+                if step == "store" or n != "download"]
     HATCH = {"rgcn": "", "hgat": "///"}
     archs = ["rgcn", "hgat"]
     dbs = [d for d in ("neo4j", "memgraph") if d in set(df.db.unique())
            and (only is None or d == only)]
     kinds = ["feature", "topo"]
     fig, axes = plt.subplots(len(dbs), len(kinds),
-                             figsize=(4.6 * len(kinds), 3.2 * len(dbs)), squeeze=False)
+                             figsize=(4.6 * len(kinds), 3.2 * len(dbs) + (0.3 if v2 else 0)),
+                             squeeze=False)
 
     def steps_of(row):
+        if store:
+            return {"download": row.t_download_ms, "update": row.t_apply_ms,
+                    "rollback": row.t_rollback_ms}
         return {"update": row.t_apply_ms + row.t_rollback_ms, "gnn": row.t_gnn_ms}
 
     for i, db in enumerate(dbs):
@@ -784,44 +808,60 @@ def fig_db_finbench_2x2(only=None):
                                        color=col, hatch=HATCH[arch],
                                        edgecolor="white", linewidth=0.3)
                             bottom += val
+                        if v2 and not store and r.iloc[0].exceeds_tol:
+                            ax.text(x, bottom, "×", ha="center", va="bottom", fontsize=8)
                     xticks.append(g0 + (ai * len(archs) + 0.5) * bw)
                     xlabels.append(mlbl)
                 grp = base[base["size"] == size]
-                glabel = f"{int(grp.pct.iloc[0])}%" if "pct" in base.columns else f"size {size}"
+                glabel = f"{grp.pct.iloc[0]:g}%" if "pct" in base.columns else f"size {size}"
                 ax.text(g0 + (nbar * bw) / 2 - bw / 2, -0.30, glabel,
                         transform=ax.get_xaxis_transform(), ha="center", va="top",
                         fontsize=8, fontweight="bold")
             ax.set_xticks(xticks)
             ax.set_xticklabels(xlabels, rotation=45, fontsize=6, ha="right")
-            ax.margins(x=0.02)
+            # every slot visible, also INQ's empty one in the update-only version
+            ax.set_xlim(-bw, (len(sizes) - 1) * group_span + nbar * bw)
+            if v2:                    # room for the deviation marks
+                ax.set_ylim(top=ax.get_ylim()[1] * 1.08)
             klabel = {"feature": "attribute", "topo": "structure"}.get(kind, kind)
             ax.set_title(f"{klabel} Δ")
             if j == 0:
                 ax.set_ylabel(f"{db}\ntime per query (ms)", fontsize=9)
     import matplotlib.patches as mp
-    handles = [mp.Patch(facecolor=C[0], label="RGCN inference"),
-               mp.Patch(facecolor=C[0], hatch="///", label="hGAT inference"),
-               mp.Patch(facecolor=C[2], label="RGCN update"),
-               mp.Patch(facecolor=C[2], hatch="///", label="hGAT update")]
-    fig.legend(handles=handles, frameon=False, fontsize=8, ncol=4,
-               loc="upper center", bbox_to_anchor=(0.5, 1.0))
+    handles = [mp.Patch(facecolor=c, hatch=h, label=f"{a} {lbl}")
+               for n, c in STEP for a, h in (("RGCN", ""), ("hGAT", "///"))
+               for lbl in [{"gnn": "inference", "update": "update", "download": "download",
+                            "rollback": "rollback"}[n]]]
+    if v2 and not store:
+        handles.append(plt.Line2D([], [], ls="", marker="x", color="k", ms=5,
+                                  label="deviation > tolerance"))
+    fig.legend(handles=handles, frameon=False, fontsize=8, ncol=len(handles),
+               loc="upper center", bbox_to_anchor=(0.5, 1 - 0.25 / fig.get_figheight() if v2 else 1.0))
     fig.suptitle("Latency vs intervention size against the baselines for FinBench",
-                 y=1.03, fontsize=10)
-    fig.tight_layout()
+                 y=1.0 if v2 else 1.03, fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.4 / fig.get_figheight()) if v2 else None)
     if only:
-        return [(fig, f"db_finbench_{only}.png")]
-    return [(fig, "db_finbench_2x2.png"), *fig_db_finbench_2x2("neo4j")]
+        name = f"db_finbench_{only}{'_' + step if step else ''}"
+        return [(fig, f"v2_{name}.pdf" if v2 else f"{name}.png")]
+    return [(fig, "db_finbench_2x2.png"),
+            *(f for st in (None, "gnn", "update") for f in fig_db_finbench_2x2("neo4j", st))]
 
 
-def fig_db_full_appendix():
+def fig_db_full_appendix(exp="db_pipeline"):
     """Appendix: the FULL store-backed step-time picture — every dataset (cols) x
     every DB/kind combination (rows), download removed, update (orange) stacked on
-    gnn (blue), ours = gnn only. One comprehensive figure."""
-    df = _load("db_pipeline")
+    gnn (blue), ours = gnn only. One comprehensive figure. v2: measured run, adds
+    NeutronRT batched, log y (batched is up to ~100x the others), deviation marks."""
+    df = _load(exp)
     if df is None or "arch" not in df.columns:
         return []
-    APPROACH = [("from_scratch", "from-scratch"), ("ripple", "Ripple"),
+    v2 = exp.startswith("db_pipeline_v2")
+    if v2:
+        df = _v2_df(df, batched=True)
+    APPROACH = [("from_scratch", "naive-GNN" if v2 else "from-scratch"), ("ripple", "Ripple"),
                 ("neutronrt", "NeutronRT"), ("ours", "INQ")]
+    if v2:
+        APPROACH.insert(3, ("neutronrt_batched", "NeutronRT batched"))
     STEP = [("gnn", C[0]), ("update", C[2])]      # gnn bottom, update on top
     HATCH = {"rgcn": "", "hgat": "///"}
     archs = ["rgcn", "hgat"]
@@ -865,27 +905,40 @@ def fig_db_full_appendix():
                                        color=col, hatch=HATCH[arch],
                                        edgecolor="white", linewidth=0.3)
                             bottom += val
+                        if v2 and r.iloc[0].exceeds_tol:
+                            ax.text(x, bottom, "×", ha="center", va="bottom", fontsize=7)
                     xticks.append(g0 + (ai * len(archs) + 0.5) * bw)
                     xlabels.append(mlbl)
                 grp = base[base["size"] == size]
-                glabel = f"{int(grp.pct.iloc[0])}%" if "pct" in base.columns else f"size {size}"
+                glabel = f"{grp.pct.iloc[0]:g}%" if "pct" in base.columns else f"size {size}"
                 ax.text(g0 + (nbar * bw) / 2 - bw / 2, -0.32, glabel,
                         transform=ax.get_xaxis_transform(), ha="center", va="top",
                         fontsize=7, fontweight="bold")
             ax.set_xticks(xticks)
             ax.set_xticklabels(xlabels, rotation=45, fontsize=5.5, ha="right")
             ax.margins(x=0.02)
+            if v2:
+                ax.set_yscale("log")
             if i == 0:
                 ax.set_title(ds)
             if j == 0:
-                ax.set_ylabel(f"{db} · {kind} Δ\ntime/query (ms)", fontsize=8)
+                klabel = {"feature": "attribute", "topo": "structure"}[kind] if v2 else f"{kind} Δ"
+                ax.set_ylabel(f"{db} · {klabel}\ntime/query (ms{', log' if v2 else ''})", fontsize=8)
     import matplotlib.patches as mp
     handles = [mp.Patch(color=C[0], label="gnn (compute)"),
                mp.Patch(color=C[2], label="update (DB apply+rollback)"),
                mp.Patch(facecolor="#ccc", label="RGCN (solid)"),
                mp.Patch(facecolor="#ccc", hatch="///", label="hGAT (hatched)")]
-    fig.legend(handles=handles, frameon=False, fontsize=8, ncol=4,
+    if v2:
+        handles[:2] = [mp.Patch(color=C[0], label="inference"),
+                       mp.Patch(color=C[2], label="update (store apply + rollback)")]
+        handles.append(plt.Line2D([], [], ls="", marker="x", color="k", ms=5,
+                                  label="deviation > tolerance"))
+    fig.legend(handles=handles, frameon=False, fontsize=8, ncol=len(handles),
                loc="upper center", bbox_to_anchor=(0.5, 1.0))
+    if v2:
+        fig.tight_layout(rect=(0, 0, 1, 0.985))
+        return [(fig, "v2_db_full_appendix.pdf")]
     fig.suptitle("Store-backed what-if step-times (all datasets) — update (orange) stacked on "
                  "gnn (blue); download removed; INQ = gnn only", y=1.005, fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.985))
@@ -924,9 +977,9 @@ def fig_scaling_L2():
     out = []
     for ycol, ylab, fname, title in (
             ("flops", "FLOPs", "scaling_L2_operations.png",
-             "FLOPs comparison between from-scratch and INQ evaluation"),
+             "FLOPs comparison between naive and INQ evaluation"),
             ("latency_best_ms", "latency (ms)", "scaling_L2_latency.png",
-             "Latency comparison between from-scratch and INQ evaluation")):
+             "Latency comparison between naive and INQ evaluation")):
         # plain (non-scientific) tick labels; ints for FLOPs, ms for latency
         if ycol == "flops":
             fmt = lambda v, _: f"{v:,.0f}"
@@ -988,9 +1041,9 @@ def fig_scaling_L2():
                 if j == 0:
                     ax.set_ylabel(f"{klab[kind]} Δ\n{ylab}", fontsize=8)
         h = [ml.Line2D([], [], color=C[0], ls="--", lw=2, marker="o", ms=4, label="INQ-RGCN"),
-             ml.Line2D([], [], color=C[0], ls="-", lw=2, marker="o", ms=4, label="from-scratch-RGCN"),
+             ml.Line2D([], [], color=C[0], ls="-", lw=2, marker="o", ms=4, label="naive-RGCN"),
              ml.Line2D([], [], color=C[3], ls="--", lw=2, marker="o", ms=4, label="INQ-hGAT"),
-             ml.Line2D([], [], color=C[3], ls="-", lw=2, marker="o", ms=4, label="from-scratch-hGAT")]
+             ml.Line2D([], [], color=C[3], ls="-", lw=2, marker="o", ms=4, label="naive-hGAT")]
         fig.legend(handles=h, frameon=False, fontsize=8, ncol=4,
                    loc="upper center", bbox_to_anchor=(0.5, 1.0))
         fig.suptitle(title, y=1.03, fontsize=10)
@@ -1231,6 +1284,69 @@ def fig_interactive_eicu(out):
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(FIGURES, f"{fname}.{ext}"),
                     bbox_inches="tight", dpi=200)
+    plt.close(fig)
+
+
+def fig_interactive_merged(out, fname="interactive_eicu_no_neutronrt_merged"):
+    """fig_interactive_eicu without NeutronRT, RGCN and hGAT merged: query Q (left) and
+    cumulative latency (right) side by side; colour =
+    method (as there), RGCN solid / filled markers, hGAT dashed / hollow markers.
+    Ripple's deviation from the truth is labelled at every step after S0."""
+    import matplotlib.lines as ml
+    bt = out["backtrack_step"]
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(8.4, 2.8), gridspec_kw=dict(wspace=0.4))
+    for ax in (ax0, ax1):
+        ax.axvline(bt, color="#bbb", lw=6, alpha=0.35, zorder=0)
+    ax0.annotate("backtrack", (bt, 1.0), xytext=(0, 2), textcoords="offset points",
+                 xycoords=("data", "axes fraction"), ha="center", va="bottom",
+                 fontsize=6.5, color="#777")
+    sty = {"rgcn": dict(ls="-", mfc=None), "hgat": dict(ls="--", mfc="white")}
+    for arch, st in sty.items():
+        rows = out["archs"][arch]["states"]
+        steps = [r["step"] for r in rows]
+        kw = dict(ls=st["ls"], lw=1.8, ms=4.5)
+        if st["mfc"]:
+            kw["mfc"] = st["mfc"]
+        ax0.plot(steps, [r["Q_scratch"] for r in rows], color=C[3], marker="o", zorder=3, **kw)
+        ax0.plot(steps, [r["Q_ours"] for r in rows], color=C[0], marker="s", zorder=4,
+                 **{**kw, "lw": 1.2})
+        Qc = [r["Q_ripple"] for r in rows]
+        ax0.plot(steps, Qc, color=C[5], marker="^", zorder=3, **kw)
+        # Ripple's deviation from the truth at every step after S0, below the point;
+        # the last step beside it (bold), RGCN right and hGAT left of the point
+        for si in range(1, len(rows)):
+            dev = (rows[si]["Q_ripple"] - rows[si]["Q_scratch"]) * 100
+            last = si == len(rows) - 1
+            if last:
+                off, ha, va = ((7, 0), "left", "center") if arch == "rgcn" else ((-6, 0), "right", "center")
+            else:
+                off, ha, va = (0, -7), "center", "top"
+            ax0.annotate(f"{dev:.1f} %", (steps[si], Qc[si]), xytext=off,
+                         textcoords="offset points", fontsize=6.5, color=C[5], ha=ha, va=va,
+                         fontweight="bold" if last else "normal", annotation_clip=False,
+                         zorder=6, bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none",
+                                             alpha=0.85))
+        ax1.plot(steps, [r["cum_lat_ms_scratch"] for r in rows], color=C[3], marker="o", **kw)
+        ax1.plot(steps, [r["cum_lat_ms_ripple"] for r in rows], color=C[5], marker="^", **kw)
+        ax1.plot(steps, [r["cum_lat_ms_ours"] for r in rows], color=C[0], marker="s", **kw)
+    ax0.set_ylabel(out.get("q_ylabel", "high-risk\nfraction Q"), fontsize=8)
+    ax1.set_ylabel("cum. latency\n(ms)", fontsize=8)
+    for ax in (ax0, ax1):
+        ax.set_xlabel("session step", fontsize=8)
+        ax.set_xticks(steps); ax.set_xticklabels([f"S{i}" for i in steps])
+        ax.tick_params(labelsize=7)
+    h = [ml.Line2D([], [], color=C[3], lw=2, label="naive-GNN (truth)"),
+         ml.Line2D([], [], color=C[0], lw=2, label="INQ"),
+         ml.Line2D([], [], color=C[5], lw=2, label="Ripple"),
+         ml.Line2D([], [], color="#555", ls="-", marker="o", ms=4, label="RGCN"),
+         ml.Line2D([], [], color="#555", ls="--", marker="o", ms=4, mfc="white", label="hGAT")]
+    fig.legend(handles=h, fontsize=6.5, frameon=False, ncol=5, loc="upper center",
+               bbox_to_anchor=(0.5, 1.0), handlelength=1.8, columnspacing=1.0)
+    fig.suptitle(out.get("fig_title", "Interactive what-if session — eICU (Neo4j-backed)"),
+                 fontsize=9.5, y=1.07)
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(FIGURES, f"{fname}.{ext}"), bbox_inches="tight", dpi=200)
     plt.close(fig)
 
 
@@ -1594,8 +1710,8 @@ def fig_revision_latency_layers(pct=10):
     return fig, "revision_latency_layers.pdf"
 
 
-def fig_revision_breakeven(frac=0.10):
-    be = _load("revision", "breakeven.csv")
+def fig_revision_breakeven(frac=0.10, exp="revision"):
+    be = _load(exp, "breakeven.csv")
     if be is None:
         return None
     be = be[(be.frac - frac).abs() < 1e-9]
@@ -1631,7 +1747,12 @@ def fig_revision_breakeven(frac=0.10):
     fig.legend(handles=h, frameon=False, ncol=3, loc="upper center",
                bbox_to_anchor=(0.5, 0.96))
     fig.tight_layout(rect=(0, 0, 1, 1 - 0.7 / fig.get_figheight()))
-    return fig, "revision_breakeven.pdf"
+    return fig, "revision_breakeven.pdf" if exp == "revision" else f"v2_{exp}_breakeven.pdf"
+
+
+def fig_v2_breakeven():
+    """Break-even k* per dataset from the measured v2 run (results/revision_v2)."""
+    return fig_revision_breakeven(exp="revision_v2")
 
 
 def fig_revision_speedup_vs_closure():
@@ -1938,7 +2059,9 @@ def _sess(exp):
     return df, _load(exp, "build.csv")
 
 
-def _sess_panels(df, nrows=1):
+def _sess_panels(df, nrows=1, ax=None):
+    if ax is not None:              # draw one dataset into a given axis (combined figures)
+        return [ax.get_title()], ax.figure, [[ax]]
     ds = [d for d in _SCALE_DATASETS if d in set(df.dataset)]
     fig, axes = plt.subplots(nrows, len(ds), figsize=(4.2 * len(ds), 2.7 * nrows),
                              squeeze=False)
@@ -2077,14 +2200,70 @@ def fig_sessions_depth(exp="sessions", ks=None):
     return fig, "sessions_depth.pdf"
 
 
-def fig_sessions_memory(exp="sessions", ks=None):
+# colour, linestyle, label of the INQ retention policies and the DB-backed baselines
+# retain N: dotted, darker blue = larger N
+_SESS_LINE = {"all": (C[0], "--", "INQ retain all"),
+              "4": ("#a9cbf2", ":", "INQ retain 4"), "8": ("#6fa6e6", ":", "INQ retain 8"),
+              "16": (C[0], ":", "INQ retain 16"), "32": ("#1c55a3", ":", "INQ retain 32"),
+              "64": ("#0d2f63", ":", "INQ retain 64"),
+              "1": (C[0], "-", "INQ base only"),
+              "neo4j": ("#333333", "-", "naive-GNN on Neo4j"),
+              "memgraph": ("#999999", "-", "naive-GNN on Memgraph")}
+
+
+def _sess_crossings(k, ours, scr, kmax):
+    """(index, y, DB) of the crossings per (policy, DB): the flip at k = 1 (after the
+    build) and the first flip after it; later wobbles around the line are not marked."""
+    cross = []
+    for o in ours.values():
+        for be, sc in scr.items():
+            above = o > sc
+            flips = [i for i in range(1, len(k)) if above[i] != above[i - 1] and k[i] <= kmax]
+            mark = [i for i in flips if i == 1][:1] + [i for i in flips if i > 1][:1]
+            cross += [(i, o[i], be) for i in mark]
+    return cross
+
+
+def _sess_cross_labels(ax, k, cross, kmax):
+    """Crossing k in red next to the crossing; on the same DB line, ks closer than 8%
+    of the axis share one label ("6,7")."""
+    import numpy as np
+    groups = []
+    for i, y, be in sorted(cross, key=lambda c: (c[2], c[0])):
+        g_ = groups[-1] if groups else None
+        if g_ and g_["be"] == be and k[i] - g_["k"][-1] < 0.08 * kmax:
+            g_["k"].append(int(k[i])); g_["y"].append(y)
+        elif not g_ or int(k[i]) not in g_["k"] or g_["be"] != be:
+            groups.append({"be": be, "k": [int(k[i])], "y": [y]})
+    for g_ in groups:
+        ax.annotate(",".join(map(str, dict.fromkeys(g_["k"]))),
+                    (np.mean(g_["k"]), np.mean(g_["y"])), xytext=(4, 5),
+                    textcoords="offset points", fontsize=7, color="#c0392b",
+                    fontweight="bold", zorder=6,
+                    bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.8))
+
+
+def _sess_handle(key):
+    import matplotlib.lines as ml
+    c, ls, lbl = _SESS_LINE[key]
+    return ml.Line2D([], [], color=c, ls=ls, lw=2, label=lbl)
+
+
+_SESS_POL = ("all", "16", "1")
+_SESS_POL_EICU = ("all", "64", "32", "16", "8", "4", "1")     # eICU also ran 4/8/32/64
+
+
+def fig_sessions_memory(exp="sessions", ks=None, into=None, pols=_SESS_POL, qmem=None):
     """Memory held at k, both sides counted in full (RGCN; hGAT within ~2%).
     Ours: the session starts from the base graph in the DB (Neo4j, as in the
     store-backed runs), downloads it once and builds cache + index: k = 0 is
     that peak (db + graph + cache + index). After it the DB copy and the edge
     lists are not read again: node features + cache + index + retained states. From-scratch on a DB: the
     stored graph + the log of the edits so far + per query the downloaded graph
-    and one forward pass (the base cache without the index)."""
+    and one forward pass (the base cache without the index).
+    qmem: results/<qmem>/states.csv with query_bytes -> INQ per query instead of held:
+    node features + index + what that query's cache reaches (its overlays, the
+    ancestor chain it resumed from, base cache); naive-GNN per query is unchanged."""
     import matplotlib.lines as ml
     import numpy as np
     df, b = _sess(exp)
@@ -2095,9 +2274,9 @@ def fig_sessions_memory(exp="sessions", ks=None):
     if sz is None or gsz is None or b is None:
         return None
     cfg0 = df[(df.config_idx == 0) & (df.arch == "rgcn")]
-    ds, fig, axes = _sess_panels(cfg0)
-    pol_ls = {"all": "--", "16": ":", "1": (0, (5, 1, 1, 1))}
-    db_c = {"neo4j": "#333333", "memgraph": "#999999"}
+    ds, fig, axes = _sess_panels(cfg0, ax=into)
+    pol_ls = {p: _SESS_LINE[p][1] for p in pols}
+    db_c = {be: _SESS_LINE[be][0] for be in ("neo4j", "memgraph")}
     MB = 2 ** 20
     for j, d in enumerate(ds):
         ax = axes[0][j]
@@ -2111,74 +2290,275 @@ def fig_sessions_memory(exp="sessions", ks=None):
         peak = neo.store_MB + g.x_MB + g.edges_MB + cache0  # build: db + downloaded graph
         # every line as a full series over k = 0..n (crossings need every state)
         ref = sub[sub.method == "scratch"].sort_values("k")
+        if ref.empty:                   # store-only run: same trace, same edit log
+            ref = sub[sub.method == "store_scratch"].sort_values("k")
         k = np.r_[0, ref.k.values]
-        ours = {pol: np.r_[peak, g.x_MB + sub[(sub.method == "ours")
-                                              & (sub.policy.astype(str) == pol)]
-                           .sort_values("k").retained_bytes.values / MB]
+        src, col = (sub, "retained_bytes") if qmem is None else (
+            _sess(qmem)[0].query("config_idx == 0 and arch == 'rgcn' and dataset == @d"),
+            "query_bytes")
+        ours = {pol: np.r_[peak, g.x_MB + src[(src.method == "ours")
+                                              & (src.policy.astype(str) == pol)]
+                           .sort_values("k")[col].values / MB]
                 for pol in pol_ls}
+        n = min(len(v) for v in ours.values())             # qmem runs a prefix
+        k, ours = k[:n], {p_: v[:n] for p_, v in ours.items()}
         scr = {}
         for be in db_c:
             r = sz[(sz.dataset == d) & (sz.backend == be)].iloc[0]
             # k = 0: what the first query needs (db + downloaded graph + GNN), empty log
             scr[be] = (r.store_MB + g.x_MB + g.edges_MB + cache0 - ix
-                       + np.r_[0.0, r.log_bytes / r.edges * ref.edges_applied_cum.values / MB])
-        # crossings per (policy, DB): the drop at k = 1 once the build is done, then
-        # the first crossing after it; later wobbles around the line are not marked
-        cross, kmax = [], max(ks) if ks else k[-1]
-        for pol, o in ours.items():
-            for be, sc in scr.items():
-                above = o > sc
-                flips = [i for i in range(1, len(k)) if above[i] != above[i - 1]
-                         and k[i] <= kmax]
-                mark = [i for i in flips if i == 1][:1] + [i for i in flips if i > 1][:1]
-                cross += [(i, o[i], db_c[be]) for i in mark]
+                       + np.r_[0.0, r.log_bytes / r.edges * ref.edges_applied_cum.values / MB])[:n]
+        kmax = max(ks) if ks else k[-1]
+        cross = _sess_crossings(k, ours, scr, kmax)
         sel = np.ones(len(k), bool) if ks is None else np.isin(k, (0, *ks, *(c[0] for c in cross)))
         for pol, ls in pol_ls.items():
-            ax.plot(k[sel], ours[pol][sel], ls=ls, color=C[0], lw=2)
+            ax.plot(k[sel], ours[pol][sel], ls=ls, color=_SESS_LINE[pol][0], lw=2)
         for be, colr in db_c.items():
             ax.plot(k[sel], scr[be][sel], "-", color=colr, lw=2)
         if ks:
             grid = np.isin(k, (0, *ks))
-            for o in (*ours.values(), *scr.values()):
-                ax.plot(k[grid], o[grid], ".", color="#666", ms=3)
-        # crossing k in red next to the crossing; on the same DB line, ks closer than
-        # 8% of the axis share one label ("6,7")
-        groups = []
-        for i, y, colr in sorted(cross, key=lambda c: (c[2], c[0])):
-            g_ = groups[-1] if groups else None
-            if g_ and g_["c"] == colr and k[i] - g_["k"][-1] < 0.08 * kmax:
-                g_["k"].append(int(k[i])); g_["y"].append(y)
-            elif not g_ or int(k[i]) not in g_["k"] or g_["c"] != colr:
-                groups.append({"c": colr, "k": [int(k[i])], "y": [y]})
-        for g_ in groups:
-            ax.annotate(",".join(map(str, dict.fromkeys(g_["k"]))),
-                        (np.mean(g_["k"]), np.mean(g_["y"])), xytext=(4, 5),
-                        textcoords="offset points", fontsize=7, color="#c0392b",
-                        fontweight="bold", zorder=6,
-                        bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.8))
+            for key, o in (*ours.items(), *scr.items()):
+                ax.plot(k[grid], o[grid], ".", color=_SESS_LINE[key][0], ms=4)
+        _sess_cross_labels(ax, k, cross, kmax)
         ax.set_yscale("linear" if ks else "log")
         if ks:
             ax.set_xlim(-2, max(ks) * 1.03)
             ax.set_ylim(bottom=0)
         ax.set_title(d)
-        ax.set_xlabel("states visited k")
+        ax.set_xlabel("states visited k" if qmem is None else "queries k")
         if j == 0:
-            ax.set_ylabel("memory held (MB)")
-    h = [ml.Line2D([], [], color=C[0], ls=pol_ls["all"], lw=2, label="INQ retain all"),
-         ml.Line2D([], [], color=C[0], ls=pol_ls["16"], lw=2, label="INQ retain 16"),
-         ml.Line2D([], [], color=C[0], ls=pol_ls["1"], lw=2, label="INQ base only"),
+            ax.set_ylabel("memory held (MB)" if qmem is None else "memory per query (MB)")
+    h = [_sess_handle(p) for p in pols] + [
          ml.Line2D([], [], color=db_c["neo4j"], lw=2,
                    label="from-scratch on Neo4j (db + log + graph + GNN)"),
          ml.Line2D([], [], color=db_c["memgraph"], lw=2,
                    label="from-scratch on Memgraph (db + WAL + graph + GNN)")]
+    if into is not None:
+        return h
     _sess_legend(fig, h)
     return fig, "sessions_memory.pdf"
 
 
-SESSIONS = (fig_sessions_time, fig_sessions_depth, fig_sessions_memory)
+def _sess_time_db(ax, exp, d, arch="rgcn", ks=None, pols=_SESS_POL):
+    """Cumulative time of a session on a DB. INQ (per retention policy): one download
+    from Neo4j + build at k = 0, then the measured in-memory session. naive-GNN on a
+    DB: the measured store_scratch rows (apply, download, tensors, forward, rollback
+    per state); Memgraph rows are method store_scratch_memgraph."""
+    import numpy as np
+    df, b = _sess(exp)
+    if df is None or b is None:
+        return False
+    sub = df[(df.config_idx == 0) & (df.dataset == d) & (df.arch == arch)]
+    bb = b[(b.dataset == d) & (b.arch == arch) & (b.backend == "neo4j")]
+    if sub.empty or bb.empty:
+        return False
+    one = float(bb.download_s.iloc[0] + bb.tensors_s.iloc[0] + bb.build_s.iloc[0])
+    scr = {}
+    for be, meth in (("neo4j", "store_scratch"), ("memgraph", "store_scratch_memgraph")):
+        st = sub[sub.method == meth].sort_values("k")
+        if not st.empty:
+            scr[be] = np.r_[0.0, st.cum_s.values]
+    n = min(len(v) for v in scr.values()) - 1          # states timed on every DB
+    if ks:
+        n = min(n, max(ks))
+    k = np.arange(n + 1)
+    scr = {be: v[:n + 1] for be, v in scr.items()}
+    ours = {}
+    for pol in pols:
+        o = sub[(sub.method == "ours") & (sub.policy.astype(str) == pol)].sort_values("k")
+        ours[pol] = np.r_[one, one + o.cum_s.values[:n] - float(o.build_s.iloc[0])]
+    cross = _sess_crossings(k, ours, scr, n)
+    sel = np.ones(len(k), bool) if ks is None else np.isin(k, (0, *ks, *(c[0] for c in cross)))
+    for key, y in (*ours.items(), *scr.items()):
+        c, ls, _ = _SESS_LINE[key]
+        ax.plot(k[sel], y[sel], ls=ls, color=c, lw=2)
+        if ks:
+            grid = np.isin(k, (0, *ks))
+            ax.plot(k[grid], y[grid], ".", color=c, ms=4)
+    _sess_cross_labels(ax, k, cross, n)
+    ax.set_ylim(bottom=0)
+    if ks:
+        ax.set_xlim(-2, max(ks) * 1.03)
+    ax.set_xlabel("states visited k")
+    ax.set_ylabel("cumulative time (s)")
+    return True
+
+
+def _sess_depth_db(ax, exp, d, arch="rgcn", ks=None, pols=_SESS_POL):
+    """Per-query latency vs path depth |D| from the base (median over the states of
+    that depth, k <= max(ks)): INQ per retention policy in memory (after the one
+    download), naive-GNN per query on each DB (apply, download, tensors, forward,
+    rollback)."""
+    df, _ = _sess(exp)
+    sub = df[(df.config_idx == 0) & (df.dataset == d) & (df.arch == arch)]
+    if ks:
+        sub = sub[sub.k <= max(ks)]
+    keys = [(p, (sub.method == "ours") & (sub.policy.astype(str) == p)) for p in pols]
+    keys += [("neo4j", sub.method == "store_scratch"),
+             ("memgraph", sub.method == "store_scratch_memgraph")]
+    for key, m in keys:
+        med = sub[m].groupby("depth").wall_s.median() * 1e3
+        c, ls, _ = _SESS_LINE[key]
+        ax.plot(med.index, med.values, ls=ls, color=c, lw=2, marker=".", ms=4)
+    ax.set_yscale("log")
+    ax.set_xlabel("path depth |D| from the base")
+    ax.set_ylabel("per-query latency (ms)")
+
+
+def _sess_breakeven_db(ax, exp, d, arch="rgcn", ks=None, pols=_SESS_POL):
+    """R1.O3 break-even: INQ = one setup on that DB (download + tensors + cache/index
+    build, build.csv) + k incremental queries per retention policy; naive-GNN = k passes
+    on the DB. Store-backed = Neo4j, in-memory = Memgraph; each INQ line uses the setup
+    of its own DB (the two setups differ by ~0.2 s, so the pairs overlap)."""
+    import numpy as np
+    df, b = _sess(exp)
+    sub = df[(df.config_idx == 0) & (df.dataset == d) & (df.arch == arch)]
+    scr, ours = {}, {}
+    for be, meth in (("neo4j", "store_scratch"), ("memgraph", "store_scratch_memgraph")):
+        st = sub[sub.method == meth].sort_values("k")
+        bb = b[(b.dataset == d) & (b.arch == arch) & (b.backend == be)].iloc[0]
+        one = float(bb.download_s + bb.tensors_s + bb.build_s)
+        n = len(st) if not ks else min(len(st), max(ks))
+        scr[be] = np.r_[0.0, st.cum_s.values[:n]]
+        for pol in pols:
+            o = sub[(sub.method == "ours") & (sub.policy.astype(str) == pol)].sort_values("k")
+            ours[(pol, be)] = np.r_[one, one + o.cum_s.values[:n] - float(o.build_s.iloc[0])]
+    k = np.arange(n + 1)
+    cross = [c for pol in pols for be in scr
+             for c in _sess_crossings(k, {pol: ours[(pol, be)]}, {be: scr[be]}, n)]
+    sel = np.ones(len(k), bool) if ks is None else np.isin(k, (0, *ks, *(c[0] for c in cross)))
+    for key, y in (*((p, v) for (p, _), v in ours.items()), *scr.items()):
+        c, ls, _ = _SESS_LINE[key]
+        ax.plot(k[sel], y[sel], ls=ls, color=c, lw=2)
+    _sess_cross_labels(ax, k, cross, n)
+    ax.set_xlim(-2, n * 1.03)        # y axis: _ybreak in fig_sessions_eicu
+    ax.set_xlabel("what-if queries k")
+    ax.set_ylabel("cumulative time (s)")
+
+
+def _axbreak(ax, lo, hi, ticks, frac=0.55, gap=0.06, axis="y"):
+    """Broken axis, linear on both sides (no log): data lo = (v0, a) fills the first
+    `frac` of the axis, hi = (b, top) the part after a `gap` sliver, where the break mark
+    sits on the spine (a gap between two short diagonals). b == a: contiguous, only the
+    scale changes; lines crossing the gap stay connected."""
+    import numpy as np
+    (v0, a), (b, top) = lo, hi
+    b = max(b, a + 1e-9)
+    xs, us = [v0, a, b, top], [0, frac, frac + gap, 1]
+    fn = (lambda v: np.interp(v, xs, us), lambda u: np.interp(u, us, xs))
+    if axis == "y":
+        ax.set_yscale("function", functions=fn); ax.set_ylim(v0, top)
+        ax.set_yticks(ticks); ax.set_yticklabels([f"{v:g}" for v in ticks])
+        ax.yaxis.set_minor_locator(plt.NullLocator())
+    else:
+        ax.set_xscale("function", functions=fn); ax.set_xlim(v0, top)
+        ax.set_xticks(ticks); ax.set_xticklabels([f"{v:g}" for v in ticks])
+        ax.xaxis.set_minor_locator(plt.NullLocator())
+    c, g, w = frac + gap / 2, 0.025, 0.016       # break centre, half gap, half width
+    for p, q in (([0, 0], [c - g, c + g]),) + tuple(
+            ([-w, w], [cc - w, cc + w]) for cc in (c - g, c + g)):
+        xy = (p, q) if axis == "y" else (q, p)
+        white = p == [0, 0]
+        ax.plot(*xy, transform=ax.transAxes, color="white" if white else "k",
+                lw=3 if white else 1, clip_on=False, zorder=5 if white else 6)
+
+
+def fig_sessions_eicu(exp="sessions", ks=None):
+    """eICU, RGCN, one interactive session on a DB: cumulative time (left; y linear up
+    to 10 s for INQ, log above for naive-GNN) and memory held (right) for the INQ
+    retention policies and naive-GNN on Neo4j/Memgraph; below, per-query latency vs
+    path depth and the R1.O3 break-even (setup on the DB + k incremental vs k passes).
+    exp: results/sessions_eicu500 (2026-11-19, one sitting: 7 policies + naive-GNN on
+    Neo4j and Memgraph, 500 states; scripts/run_sessions_eicu500.sh)."""
+    if exp == "sessions":           # main_sessions passes the main run; use the eICU one
+        exp = "sessions_eicu500"
+    fig, ((a, m), (dp, mq)) = plt.subplots(2, 2, figsize=(8.4, 5.6))
+    m.set_title("eicu")             # fig_sessions_memory reads the dataset off the title
+    if (not _sess_time_db(a, exp, "eicu", ks=ks, pols=_SESS_POL_EICU)
+            or fig_sessions_memory(exp, ks, m, _SESS_POL_EICU) is None):
+        return None
+    _sess_depth_db(dp, exp, "eicu", ks=ks, pols=_SESS_POL_EICU)
+    _sess_breakeven_db(mq, exp, "eicu", ks=ks, pols=_SESS_POL_EICU)
+    # broken y axes, linear on both sides: INQ below the break, naive-GNN above; the time
+    # axes are contiguous (scale change only) so no naive-GNN value hides in the gap
+    if ks is None or max(ks) > 100:             # naive-GNN reaches ~1200 s at k = 500
+        for ax in (a, mq):
+            _axbreak(ax, (0, 25), (25, 1300), [0, 5, 10, 15, 20, 25, 250, 500, 750, 1000, 1250])
+        _axbreak(m, (0, 100), (100, 450), [0, 20, 40, 60, 80, 100, 200, 300, 400], frac=0.6)
+    else:
+        for ax in (a, mq):
+            _axbreak(ax, (0, 8), (8, 260), [0, 2, 4, 6, 8, 50, 100, 150, 200, 250])
+    _axbreak(dp, (0, 45), (1900, 2700), [0, 10, 20, 30, 40, 2000, 2250, 2500], frac=0.7)
+    if ks is None or max(ks) > 100:             # x: 0-100 as in k100, 100-500 compressed
+        _axbreak(m, (-5, 100), (100, 515), [0, 20, 40, 60, 80, 100, 300, 500],
+                 frac=0.6, axis="x")         # memory panel only (user, 2026-11-20)
+    m.set_title("")
+    fig.suptitle("eICU session at scale", y=1.0, fontsize=11)
+    fig.legend(handles=[_sess_handle(k) for k in (*_SESS_POL_EICU, "neo4j", "memgraph")],
+               frameon=False, fontsize=8, ncol=5, loc="upper center",
+               bbox_to_anchor=(0.5, 1 - 0.3 / fig.get_figheight()))
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.62 / fig.get_figheight()))
+    return fig, "sessions_eicu.pdf"
+
+def fig_sessions_breakeven_eicu(exp="sessions", ks=None):
+    """R1.O3 on eICU: cumulative time of a session vs queries k, per arch. INQ = one
+    setup on the DB (download + tensors + cache/index build) + k incremental queries
+    (retain all, in memory); naive-GNN = k full passes on the DB (apply, download,
+    tensors, forward, rollback). Store-backed = Neo4j, in-memory = Memgraph. k* (first
+    k where INQ <= naive-GNN on that DB) marked."""
+    import matplotlib.lines as ml
+    import numpy as np
+    df, b = _sess(exp)
+    if df is None or b is None:
+        return None
+    sub = df[(df.config_idx == 0) & (df.dataset == "eicu")]
+    dbs = {"neo4j": ("store_scratch", "#333333", "Neo4j (store-backed)"),
+           "memgraph": ("store_scratch_memgraph", C[0], "Memgraph (in-memory)")}
+    fig, axes = plt.subplots(1, 2, figsize=(8.4, 2.9), sharey=True)
+    for ax, arch in zip(axes, ("rgcn", "hgat")):
+        s = sub[sub.arch == arch]
+        o = s[(s.method == "ours") & (s.policy.astype(str) == "all")].sort_values("k")
+        for be, (meth, col, _) in dbs.items():
+            st = s[s.method == meth].sort_values("k")
+            bb = b[(b.dataset == "eicu") & (b.arch == arch) & (b.backend == be)]
+            if st.empty or bb.empty:
+                return None
+            n = len(st) if not ks else min(len(st), max(ks))
+            k = np.arange(n + 1)
+            one = float(bb.download_s.iloc[0] + bb.tensors_s.iloc[0] + bb.build_s.iloc[0])
+            inq = np.r_[one, one + o.cum_s.values[:n] - float(o.build_s.iloc[0])]
+            scr = np.r_[0.0, st.cum_s.values[:n]]
+            ax.plot(k, scr, "-", color=col, lw=2)
+            ax.plot(k, inq, "--", color=col, lw=2)
+            ks_ = next(i for i in range(1, n + 1) if inq[i] <= scr[i])
+            ax.plot(ks_, inq[ks_], "o", color=col, ms=6, mfc="white", mew=1.5, zorder=5)
+            ax.annotate(f"k*={ks_}", (ks_, inq[ks_]), xytext=(6, -12 if be == "neo4j" else 6),
+                        textcoords="offset points", fontsize=8, color=col, fontweight="bold")
+        ax.set_yscale("symlog", linthresh=10, linscale=1.5)
+        ax.set_yticks([0, 5, 10, 50, 100, 200])
+        ax.set_yticklabels(["0", "5", "10", "50", "100", "200"])
+        ax.yaxis.set_minor_locator(plt.NullLocator())
+        ax.set_ylim(0, 300)
+        ax.set_xlim(-1, k[-1] * 1.02)
+        ax.set_title(f"eicu, {'RGCN' if arch == 'rgcn' else 'hGAT'}")
+        ax.set_xlabel("what-if queries k")
+    axes[0].set_ylabel("cumulative time (s)")
+    h = [ml.Line2D([], [], color="#777", ls="--", lw=2, label="INQ: cache + k incremental"),
+         ml.Line2D([], [], color="#777", ls="-", lw=2, label="naive-GNN: k from-scratch passes"),
+         *(ml.Line2D([], [], color=c, lw=6, label=lbl) for _, c, lbl in dbs.values()),
+         ml.Line2D([], [], color="#777", ls="", marker="o", mfc="white", label="break-even k*")]
+    fig.legend(handles=h, frameon=False, fontsize=8, ncol=3, loc="upper center",
+               bbox_to_anchor=(0.5, 1.0))
+    fig.tight_layout(rect=(0, 0, 1, 0.82))
+    return fig, "sessions_breakeven_eicu.pdf"
+
+
+SESSIONS = (fig_sessions_time, fig_sessions_depth, fig_sessions_memory, fig_sessions_eicu,
+            fig_sessions_breakeven_eicu)
 
 
 SESSIONS_K100 = (*range(5, 31, 5), 50, 75, 100)   # coarse prefix grid, k <= 100
+SESSIONS_K500 = (*SESSIONS_K100, *range(125, 501, 25))   # 500-state eICU run
 
 
 def main_sessions(exp="sessions", ks=None):

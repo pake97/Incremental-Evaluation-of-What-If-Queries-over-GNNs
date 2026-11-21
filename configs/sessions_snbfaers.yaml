@@ -1,0 +1,30 @@
+# SNB + FAERS sessions, one sitting (RGCN, config 0, all 7 policies over the whole trace; naive-GNN on Neo4j + Memgraph, first 100 states); 2026-11-20.
+# R2.O2 session experiment (REVISION_PLAN.md §7): one 500-state exploration DAG per
+# (dataset, configuration); the 10 / 50 / 100 / 200-state points are its prefixes.
+datasets: [snb, faers]
+archs: [rgcn]
+task: nodelabel
+layers: 2
+
+n_states: 500
+configs:                       # (branching, max_depth, backtrack_rate)
+  - [2, 8, 0.3]
+  - [4, 8, 0.3]
+  - [2, 50, 0.1]               # deep: latency vs path depth
+trace:                         # src/explore/trace.TraceConfig, deltas as in §5.4
+  share_rate: 0.25
+  feature_frac: 0.5
+  cohort_size: 32
+  topo_edits: 8
+
+impl: v2
+policies: [all, 64, 32, 16, 8, 4, 1]
+reps_ours: {all: 3, 16: 1, 1: 1}   # whole-trace repetitions per policy; median per state / cumulative
+check_every: 10                # exactness vs whatif_forward, untimed, first rep only
+
+store:                         # (c) store-backed from-scratch, Neo4j only
+  backend: neo4j
+  datasets: [snb, faers]
+  config: 0                    # index into configs
+  n_states: 100
+db_config: configs/db.yaml

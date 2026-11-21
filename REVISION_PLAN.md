@@ -16,7 +16,7 @@ Consolidated results: `results/RESULTS_revision_and_overhead_fix.md` (summarized
 | Fig. 3 / Fig. 4 | measured latency replacing the `latency_best_ms` projection | Part D (10 timed reps, 1 warm-up, median/p10/p90) | **done**, v1 and v2 | `revision_latency_L2.pdf`, `revision_latency_layers.pdf`, `v2_*.pdf` |
 | R3.O1 cost from affected rows | re-derive the §4.1 cost from affected rows, not |Γ| | Part D (`dirty_frontier`, `sign_flips`, `edges_scanned`/`edges_touched`) | **done** | `revision_rows_vs_flips.pdf`, T-d |
 | R3.O3 systems section | architecture figure, components, what is cached and at what cost | written from the v2 change list | **started** in the paper (`sections/05b_system.tex`, `figures/architecture.pdf`, Oct 26) | paper folder |
-| R3.O4 Fig. 5 split, latency with deviation, lower-bound remark, operating regime | store-update vs inference panels; baselines | **not run**: no Ripple / NeutronRT timings against v2 yet | open | `src/baselines/` |
+| R3.O4 Fig. 5 split, latency with deviation, lower-bound remark, operating regime | store-update vs inference panels; baselines | `exp_db_pipeline_v2`, full run 2026-11-17 (§4 item 5) | **run**; text and figure choice open | `results/db_pipeline_v2/`, `figures/v2_db_finbench_neo4j_gnn.pdf`, `v2_db_full_appendix.pdf`, `table4_deviation_finbench.csv` |
 | R2.O2 sessions at scale | DAGs of 10 to 500 states, cumulative time, latency vs path depth, memory under retention policies | §7, `exp_sessions` | **done** 2026-10-31 (quiet run) | `results/sessions/`, `figures/sessions_{time,depth,memory}.pdf`, `kstar.csv` |
 | R1.O1, R1.O2, R3.O2 | text only in the final RP | none needed | paper | |
 
@@ -91,6 +91,111 @@ Results (`results/overhead_fix/README.md`, v1 re-timed under the same conditions
 5. **R3.O4:** re-time Ripple and NeutronRT against v2 under the same conditions; split Fig. 5
    into store-update and inference panels; latency with max deviation in one view; report the
    compiled from-scratch baseline openly (or compile v2 too).
+   **Pilot 2026-11-17** (`src/eval/exp_db_pipeline_v2.py`, FinBench/Neo4j, quiet, AC; log
+   `results/logs/db_pipeline_v2_pilot_20261117_124825.log`, CSV `results/db_pipeline_v2/`):
+   every method now timed (10 reps, 1 warm-up, no_grad), store update with the fixed
+   `_apply_delta`, deviation vs naive-GNN per row, July projection kept as `t_gnn_proj_ms`.
+   INQ exact on all 20 settings. Measured/projected: INQ 1.1-1.55x, Ripple/NeutronRT 2.4-8.6x:
+   the reference baselines run at 0.33-1.07 us/edge vs 0.09-0.18 for naive and INQ (dense
+   N x hidden buffers and full-edge-list masks per relation).
+   **Decided 2026-11-17: port the baselines to the v2 primitives first.** Done:
+   `src/baselines/linprop_v2.py` (GraphIndex out-edges, row-sparse buffers, edges re-sorted to
+   the reference's order), `Ripple/NeutronRT(..., impl="optimised")` (NeutronRT-hGAT = v2
+   closure); reference kept as default. Bitwise equal to the reference incl. Ripple's NaN/inf
+   rows (`tests/test_baselines_v2.py`, 14 cases); pytest 124 passed; gate 1848 PASS (6.1e-5).
+   Pilot 3 (`results/db_pipeline_v2/`, both impls; pilots 1-2 archived as `_pilot1/2`; machine
+   NOT quiet, load 6-7, Firefox): optimised 0-35% faster. Remaining gap on Ripple and
+   NeutronRT-RGCN (0.30-0.46 us/edge vs INQ 0.12-0.18) is the reference formulation (full
+   aggregate re-gather + z_base recompute per touched row, W per edge), not data access.
+   NeutronRT batch = configs/db.yaml `neutron_batch_frac: 0.01` (1% |E| = 3096 edges); the
+   NeutronRT paper's default is 0.01% |E| (small graphs). Full run waits on the user's go.
+   **Decided 2026-11-17: INQ gets the degree-renormalised Δ path for RGCN edge edits** (v2
+   only, `incremental_forward(..., method="delta", impl="v2")` on a topological/mixed Δ;
+   `auto` routing and v1 unchanged, so earlier v2 results stand). `src/incremental/delta_v2.py`:
+   kept edges W·Δh, added W·h', deleted -W·h, degree-changed rows rebuild the base sum from
+   their in-edges. Tests: `test_v2_delta_edge_edits_*` (L 1/2/4, topo+mixed, pilot sizes);
+   pytest 133 passed; gate 1848 PASS (6.1e-5). Pilot 4 (FinBench/Neo4j, load ~7, Firefox, not
+   for the paper): RGCN structure INQ 49-78 ms vs closure 107-128, naive 113-130, NeutronRT
+   115-177; edges 419k-834k (closure 812k-1045k, NeutronRT 274k-578k), max dev 1.4e-6.
+   db_pipeline_v2 runs INQ with the Δ path on RGCN (column `inq_path`), `inq_closure` kept.
+   Bug fixed same day in that path: a row left with no in-edges of a relation got
+   residual/1e-8 instead of 0 (fixed-seed test `test_v2_delta_edge_edits_many_seeds`, 60 seeds;
+   the hash()-seeded tests vary per process and had passed by luck; pilot INQ rows were exact).
+   **Tried 2026-11-17 for hGAT, negative:** (A) dense switch in closure_v2 (fused full-relation
+   pass when rows cover >= 0.6/0.75/0.9 of in-edges): +-5-10%, noise; removed. (B) attention Δ
+   (`closure_forward_v2(..., attn=attn_state(...))`, hGAT `method="delta"`, v2, base cache;
+   cached softmax N, D, shift per layer x relation, 158 MB on FinBench vs 68 MB h+z): exact
+   (13 tests, <= 3.8e-6), 27-50% fewer edges, but slower on attribute (209-339 vs closure
+   172-239 ms) and equal on structure: eager CPU cost is gather calls, not edges. Not used by
+   any experiment (`auto` unchanged); keep-or-revert is the user's call.
+   **Full run 2026-11-17 19:52 → 2026-11-18** (`scripts/run_db_pipeline_v2.sh`, log
+   `results/logs/db_pipeline_v2_20261117_195240.log`; pilot 5 archived as `_pilot5`): pytest 146
+   passed, gate 1848 PASS (6.1e-5), PASS db_pipeline_v2 1584 rows (4 datasets x Neo4j/Memgraph x
+   RGCN/hGAT x attribute/structure x 0.1/5/10/15/20/30%, L=2). Machine: AC, user apps closed;
+   top-5 at the experiment start shows only the run (97%) and mdworker (<10%); loadavg 6 on 16
+   cores includes the run and the Docker VM. NeutronRT batch = 0.5% |E_stored| (`neutron_batch_frac`).
+   Deviations: INQ and NeutronRT <= 8e-6 everywhere; Ripple exact only on RGCN attribute
+   (hGAT attribute up to 0.11, RGCN structure up to 6e15, hGAT structure non-finite).
+   INQ inference loses to naive-GNN on: eICU hGAT (both kinds) and RGCN structure (small graph,
+   naive ~30 ms); FAERS structure (both archs); FinBench hGAT attribute >= 10%. On FAERS RGCN
+   structure the Δ path is slower than the closure (1266-1740 vs 1081-1156 ms, naive ~850) and
+   than NeutronRT one-shot in 12/12 settings: the Δ path is not a uniform win; `auto` routing
+   for RGCN structure is an open decision.
+   **Tried 2026-11-18, scratch fallback** (`incremental_forward(..., fallback=θ)`, v2 closure
+   path, off by default; `closure_edges_estimate` = the closure's frontier expansion on the
+   index, equals `edges_touched` exactly; above θ it runs build_cache on gs ⊕ iv, exact).
+   FinBench hGAT, interleaved, machine not quiet: the estimate costs 9-22 ms, so fallback =
+   naive + 17-25 ms. 10% attribute: INQ 214, fallback 222, naive 205; 30% attribute: INQ 264,
+   fallback 245, naive 222; 30% structure: INQ 220, fallback 239, naive 220. Gain only at
+   30% attribute; no experiment uses it; keep-or-revert is the user's call.
+   **Added 2026-11-18, closure dense blocks** (`closure_forward_v2(..., dense_frac=)`, via
+   `incremental_forward(..., dense_frac=)`, v2 only, default None; db.yaml `inq_dense_frac: 0.5`).
+   Cause found by profiling FinBench hGAT: at >= 10% the last layer already recomputes 97-99.6%
+   of account in-edges, but pays per-edge slicing / lut / gathers (aten::index 2.4x naive's).
+   A node type with >= dense_frac of its rows dirty is recomputed in full on the whole edge
+   lists (gs ⊕ iv order, clean rows come out unchanged), stored as a plain tensor; frontier
+   expansion for such types is one masked pass over E. Tests
+   `test_v2_closure_dense_blocks_*` (rgcn/hgat, L 1/2/4, 3 kinds, dense_frac 0/0.5, + fallback,
+   + pilot sizes); pytest 186 passed. FinBench hGAT interleaved (machine not quiet), INQ ->
+   dense0.5 vs naive: attribute 0.1% 62->62/195, 5% 182->172/196, 10% 207->189/200, 15%
+   230->202/207, 20% 241->206/208, 30% 252->213/207; structure 0.1% 50->47/202, 5% 178->172/216,
+   10% 193->172/209, 30% 216->178/215. All exact. NeutronRT-hGAT (optimised = v2 closure) left
+   without dense blocks (baseline unchanged; user 2026-11-18: NeutronRT is not to be optimised).
+   **FinBench re-run 2026-11-18 10:26** (log `results/logs/db_pipeline_v2_20261118_102629.log`;
+   run 1 kept as `results/db_pipeline_v2_run1/`, only FinBench rows replaced): pytest 186, gate
+   1848 PASS, 1584 rows. INQ exact (max dev 1.4e-6). INQ beats naive-GNN in 45/48 FinBench
+   settings; loses only hGAT attribute 20-30% on Neo4j (162 vs 160, 173 vs 164) and 30% on
+   Memgraph (194 vs 188). hGAT INQ vs run 1: attribute -4..-17%, structure up to -17%.
+   **1% replaces 0.1% on FinBench (user, 2026-11-18)**: `fracs` now starts at 0.01; FinBench 1%
+   rows run 12:41 (log `results/logs/db_pipeline_v2_finbench_1pct_*.log`; machine NOT quiet at
+   launch: cmux 64%, WindowServer 52%, load 6.6), 0.1% rows kept in
+   `results/db_pipeline_v2/results_with_0.1pct_finbench.csv`. INQ exact. Neo4j 1%: RGCN attr 29
+   vs naive 122, struct 31 vs 127; hGAT attr 95 vs 152, struct 90 vs 165. eICU/FAERS/SNB still
+   have 0.1%, not 1%.
+   Outputs: `figures/v2_db_finbench_neo4j_gnn.pdf` (paper: inference, one-shot NeutronRT, x =
+   deviation > tolerance), `figures/v2_db_full_appendix.pdf` (supplementary: update stacked on
+   inference, both stores, 4 datasets, NeutronRT batched included, log y),
+   `results/db_pipeline_v2/table4_deviation_finbench.csv` (max dev per method x arch x kind over
+   sizes and stores).
+   **Edited node type (2026-11-18):** on FinBench the 2-hop closure of a random 10% of accounts
+   already covers ~77% of nodes (random, neighbourhood and predicate cohorts alike), so hGAT INQ
+   hits the full-recompute floor; editing other types is much cheaper (standalone hGAT attr
+   speedup at 30%: account 0.96x, company 1.24x, person 1.21x, loan 1.13x, medium 1.91x). User
+   chose `medium` (best for INQ) -- **needs a semantic justification in the paper, not speed**.
+   New flags `--feature-nt/--kinds/--exp`; run 14:49 Neo4j attribute only, machine quiet ->
+   `results/db_pipeline_v2_medium/` (96 rows, INQ exact). hGAT INQ 23-89 ms vs naive 159-171;
+   one-shot NeutronRT ties INQ (22-83 ms, same closure machinery); Ripple faster but deviates
+   0.11. Figure (attribute = medium, structure from the main run):
+   `figures/v2_medium_db_finbench_neo4j_gnn.pdf`. Open: Memgraph and other datasets on the same
+   rule. Hand-edited cells in `results/db_pipeline_v2/results.csv` (16: Neo4j naive attr
+   15-30% both archs, 10 FinBench 1% medians) **restored 2026-11-18**: 5-30% rows from the
+   pre-edit copy `results_with_0.1pct_finbench.csv` (same 10:26 run, full precision), 1%
+   medians from `results/logs/db_pipeline_v2_finbench_1pct_*.log` (0.1 ms precision); edited
+   version kept as `results_handedited_20261118.csv`, not for use. FinBench figures drop 1%.
+   **Figures use the reference baselines (user, 2026-11-18):** Ripple and NeutronRT as in
+   their papers, not our optimised ports (`figures._v2_df` filters impl=reference). Optimised
+   rows stay in the CSVs. Neo4j medium-node figure: INQ is the fastest exact method in
+   every cell.
 6. **R2.O2:** sessions-at-scale experiment (not started).
 7. **SNB:** batch the per-relation operations (19 to 28% Python/dispatch in the profile).
 8. Index as int32 (halves 169 MB); full-range slice skip at near-full reach was left out on
@@ -228,6 +333,68 @@ gate 40/40 (output diff vs in-memory max 1.5e-4, recorded, hGAT edge order). 46,
   2.5-3.5 GB. Retain-all grows ~linearly in k; keep-16 is the policy to report as practical.
 - Store-backed per state: download dominates (eICU 2.3 s, FinBench 6.5 s); apply 6 ms,
   rollback 1 ms, undo heap 2 MiB (quantum).
+- Added 2026-11-13 (machine quiet after killing a stuck BTLEServer, on AC; logs
+  `results/logs/sessions_memgraph_20261113_002504.log`, `sessions_policies_eicu_20261113_005352.log`):
+  - Memgraph store-backed (`store_scratch_memgraph`, eICU + FinBench, config 0, 100 states):
+    cum[100] eICU 211 s (Neo4j 240), FinBench 618-625 s (Neo4j 684-693); download 2.05 s /
+    5.8 s per state; graph gate passed, 40/40 checks. k* = 2 on both DBs (eICU RGCN).
+  - eICU retention 4 / 8 / 32 / 64 (all configs, both archs, 1 rep): 2400 checks exact.
+    Config 0 RGCN cum[500] 14.8 / 14.7 / 13.7 / 13.2 s at 15.7 / 18.4 / 45.8 / 73.4 MB
+    (all/16/1 from the Oct 30 run: 15.2 / 17.3 / 21.3 s). Deep config: 4-8 is the cheapest
+    (16.5 s), 64 is slower (18.1 s). In `sessions_eicu_k100` (time | memory).
+  - CAVEAT: all/16/1 (Oct 30) and 4/8/32/64 (Nov 13) are different runs; mixed, retain-all
+    looked slower than 4/8 although it recomputes 30% fewer nodes. A same-process check
+    (`results/sessions_policycheck/`, battery, not for the paper) is monotone: cum[500]
+    all 14.7 < 64 15.1 < 32 16.0 < 16 16.9 < 8 18.4 < 4 19.4 < base 22.0 s. DONE 2026-11-18:
+    all 7 policies rerun in one quiet run (AC, top idle; `results/sessions_eicu_policies/`, log
+    `results/logs/sessions_eicu_policies_20261118_194945.log`, 350/350 exact): cum[500] all
+    14.65 < 64 14.99 < 32 16.04 < 16 17.03 < 8 18.15 < 4 18.62 < base 21.83 s. Merged into
+    `results/sessions_eicu_quiet/` (results/sessions with those eICU RGCN INQ rows replaced);
+    `fig_sessions_eicu` reads it. INQ at k = 100 on Neo4j: all 5.55, 32 5.59, 64 5.60, 16 5.65,
+    4 5.85, 8 5.86, base 6.55 s.
+  - 2026-11-18 (user): `sessions_eicu_k100` is now 2x2: + per-query latency vs path depth
+    (median wall per depth, k <= 100; INQ in memory vs naive-GNN per query on Neo4j/Memgraph)
+    and + memory per query (INQ: x + index + what the query's own cache reaches, new column
+    `query_bytes` from `run_trace(account=True)`). query_bytes run: `exp_sessions --parts ours
+    --datasets eicu --configs 0 --archs rgcn --n-states 100 --policies all 64 32 16 8 4 1
+    --exp sessions_querymem` (memory only; 70/70 exact). INQ 11-17 MB per query vs naive-GNN
+    15 MB (Neo4j) / 36 MB (Memgraph); latency 15-45 ms vs ~2.3 s per query.
+    CAVEAT memory-per-query panel: naive-GNN counts the DB every query, INQ does not; with the
+    DB on both sides or neither INQ needs 2-8 MB MORE per query (index + chain). Not in the
+    promise; don't use as drawn. 2026-11-18 (user): dropped from `sessions_eicu_k100`; the
+    bottom-right panel is now the R1.O3 break-even (`_sess_breakeven_db`, all 7 policies, INQ
+    setup on each DB + k incremental vs naive-GNN on Neo4j / Memgraph): k* = 2 for every policy.
+  - 2026-11-19 (user): eICU session at 500 states, one sitting on the M3 Max (AC, top idle):
+    `scripts/run_sessions_eicu500.sh` (`configs/sessions_eicu500.yaml`: eICU, RGCN, config 0,
+    7 policies, store on Neo4j then Memgraph to 500) -> `results/sessions_eicu500/`, log
+    `results/logs/sessions_eicu500_20261119_125238.log`, 450/450 exact. INQ cum[500] all 14.31,
+    64 14.31, 32 15.39, 16 16.12, 8 16.94, 4 17.50, base 19.88 s; naive-GNN cum[500] Neo4j
+    1209 s (2.35 s download/query), Memgraph 1072 s (2.07 s). k* = 2 on both DBs, every policy.
+    `fig_sessions_eicu` now reads this run (title "eICU session at scale", no panel titles):
+    `figures/sessions_eicu_k100.pdf` (its first 100 states) and `figures/sessions_eicu_k500.pdf`.
+    `results/sessions_eicu_quiet/` is superseded. Memory panel takes the edit log from the
+    store_scratch rows (same trace, verified identical to results/sessions).
+  - 2026-11-20: `figures/v2_breakeven.pdf` (`fig_v2_breakeven`, from
+    `results/revision_v2/breakeven.csv`): k* per dataset x arch x kind at 10%, in-memory /
+    Neo4j / Memgraph, measured single-query latency. Store-backed k* = 2 on all 4 datasets;
+    in-memory 2-19 or none (hGAT eICU, topo). Replaces the v1 `revision_breakeven.pdf`.
+    `v2_db_full_appendix.{pdf,png}` re-rendered (reference baselines, restored CSV).
+  - 2026-11-20 (user go): SNB + FAERS sessions, one sitting, `scripts/run_sessions_snbfaers.sh`
+    (`configs/sessions_snbfaers.yaml`: RGCN, config 0, 7 policies over the whole trace, naive-GNN
+    on Neo4j then Memgraph for the first 100 states) -> `results/sessions_snbfaers/`. Graph gate
+    pre-checked on both DBs (exact). Estimate ~7 h. hGAT not included (would double DB time).
+    DONE (8 h 3 min, 128 GB machine, PASS 580/580 + 600/600 exactness). INQ cum over the trace
+    (keep all -> 1): SNB 440 states, 107-206 s, retained 13.75 GB -> 418 MB (not monotone: keep 64 129 s >
+    keep 32 115 s); FAERS 352 states, 195-261 s,
+    retained 2.49 GB -> 194 MB. Naive-GNN cum[100] (download dominates): SNB Neo4j 3216 s /
+    Memgraph 2860 s; FAERS Neo4j 9151 s / Memgraph 7514 s. INQ at 100 queries (setup + incr):
+    SNB 56-74 s (Neo4j) / 53-71 s (Memgraph); FAERS 147-163 s / 131-147 s.
+    k* = 2 for every policy, both DBs, both datasets (same as eICU). No figure yet.
+  - 2026-11-18 (user): R1.O3 promise read as store-backed = Neo4j, in-memory = Memgraph.
+    `figures/sessions_breakeven_eicu.pdf` (`fig_sessions_breakeven_eicu`): cumulative time vs
+    k, INQ (DB setup + k incremental, retain all) vs naive-GNN (k passes on the DB), RGCN | hGAT,
+    k* marked. eICU k*: RGCN 2/2, hGAT 1 (Neo4j) / 2 (Memgraph); FinBench 2 everywhere.
+    SNB/FAERS have no DB session yet (proposed: 10 queries per DB/arch, ~1 h 15 min).
 
 ### Plan as drafted
 
@@ -290,7 +457,12 @@ scripts/run_revision.sh                                   # phase 1 (v1)
 scripts/run_quiet.sh                                      # paper run: overhead_fix + sessions + figures, logged
 scripts/run_sessions.sh                                   # R2.O2 only (resumable; results/sessions/)
 venv/bin/python -m src.eval.figures --sessions            # fig_sessions_{time,depth,memory}, kstar.csv
+venv/bin/python -m src.eval.figures --sessions-k100       # same on k <= 100, + sessions_eicu (time | memory)
+venv/bin/python -m src.eval.exp_sessions --parts store --datasets eicu finbench --configs 0 --store-backend memgraph
+venv/bin/python -m src.eval.exp_sessions --parts ours --datasets eicu --policies 4 8 32 64
 scripts/run_overhead_fix.sh                               # phase 2: pytest, gate, profiles, revision_v2, figures, tables
 venv/bin/python -m src.eval.exp_revision --config configs/revision.yaml --impl v2 --exp revision_v2 --parts A C D B E F report
 venv/bin/python -m src.eval.figures --revision --v2
+scripts/run_db_pipeline_v2.sh                             # R3.O4: pytest, gate, exp_db_pipeline_v2 (resumable; results/db_pipeline_v2/)
+# figures: F.fig_db_finbench_2x2('neo4j', 'gnn', exp='db_pipeline_v2'), F.fig_db_full_appendix('db_pipeline_v2')
 ```
